@@ -3,7 +3,7 @@ import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { applyRuntimeSettings, registerIpc } from './ipc'
 import { flushStore, getSettings } from './store'
-import { normalizePortalLocale } from '../shared/portalLocale'
+import { configurePortalEnvironment } from './portalEnvironment'
 import { closePortalWindow } from './kiroPortal'
 import {
   cancelLogin,
@@ -35,14 +35,8 @@ import { applyThemeMode, windowBackground } from './appearance'
 import { initBackupScheduler, stopBackupScheduler } from './backupScheduler'
 import { warmKiroMachineId } from './kiroEndpoints'
 
-/*
- * 按设置里的地区指定 Chromium 区域。
- *
- * 会话级的 Accept-Language 只影响请求头，页面内的 navigator.language 跟应用全局
- * locale 走，门户若按前端语言判断就只有这个开关管用。它必须在 app ready 之前设置，
- * ready 之后再调用不生效——所以这里同步读一次设置，也因此改地区需要重启应用。
- */
-app.commandLine.appendSwitch('lang', normalizePortalLocale(getSettings().portalLocale))
+// 在单例锁和任何窗口之前固定进程环境；macOS 必要时仅自动重启一次。
+configurePortalEnvironment()
 // QUIC / WebRTC UDP must not provide an alternate direct route around HTTP/SOCKS proxies.
 app.commandLine.appendSwitch('disable-quic')
 app.commandLine.appendSwitch('dns-prefetch-disable')

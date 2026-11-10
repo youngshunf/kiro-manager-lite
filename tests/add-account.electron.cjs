@@ -123,8 +123,10 @@ async function run() {
   await evaluate(`window.api.saveSettings({autoRefresh:false,autoRefreshUsage:false,backupEnabled:false,trayEnabled:false,portalProxyUrl:${JSON.stringify(proxyUrl)}})`)
   // Settings changed through IPC must be reloaded into the renderer store, as at app startup.
   main.webContents.reload()
-  await until(()=>evaluate(`!!window.api && document.readyState==='complete'`), 'reload settings')
-  await evaluate(`location.hash='#/accounts'`)
+  // document.readyState may become complete before Vue and its initial async route mount.
+  // Use the same ready, mounted navigation control as the user, not a racing hash write.
+  await until(()=>evaluate(`!!window.api && !!document.querySelector('.app-sidebar .ant-menu-item')`), 'mounted navigation after reload')
+  await evaluate(`[...document.querySelectorAll('.app-sidebar .ant-menu-item')].find(el=>el.textContent.includes('账户管理')).click()`)
   await until(()=>evaluate(`document.body.innerText.includes('添加账号')`), 'accounts page')
   await click('添加账号')
   await until(()=>evaluate(`!!document.querySelector('#add-account-proxy')`), 'proxy field')

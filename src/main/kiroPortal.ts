@@ -23,7 +23,7 @@ import {
 } from 'electron'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
-import { acceptLanguageFor } from '../shared/portalLocale'
+import { assertPortalEnvironment, PORTAL_ACCEPT_LANGUAGE } from './portalEnvironment'
 import { codeWhispererEndpoint } from './kiroEndpoints'
 import { getSettings } from './store'
 import { configurePortalProxy, forgetPortalProxy, portalRequest } from './portalNetwork'
@@ -64,11 +64,8 @@ const LOAD_TIMEOUT_MS = 6000
 const LOAD_ATTEMPTS = 4
 
 /**
- * 伪装成普通 Chrome。
- *
- * 默认 UA 会带上应用名与 Electron/<版本>，对站点来说是显眼的自动化特征。
- * 版本号直接取内置 Chromium 的主版本而不是写死一个更新的值：UA 里声称的版本
- * 与实际引擎能力对不上，本身也是可被识别的破绽。
+ * 使用与实际 Chromium 内核匹配的稳定 UA，不携带应用名 / Electron token。
+ * 不随机轮换或声称这能隐藏运行环境；UA 只是网页能够观察到的一项信息。
  */
 const CHROME_MAJOR = process.versions.chrome.split('.')[0] || '134'
 
@@ -92,11 +89,8 @@ export function inAppChromeUserAgent(): string {
   return CHROME_UA
 }
 
-/**
- * 应用内网页使用的地区，由设置里的「浏览器地区」决定。
- * 主进程启动时读一次设置，之后随设置保存实时更新（无需重启即可生效）。
- */
-let acceptLanguage = acceptLanguageFor()
+/** 网页一律使用美式英语，不继承旧设置或宿主语言。 */
+const acceptLanguage = PORTAL_ACCEPT_LANGUAGE
 
 let globalUaApplied = false
 
@@ -117,16 +111,8 @@ function applyGlobalUserAgent(): void {
   app.userAgentFallback = CHROME_UA
 }
 
-/**
- * 设置应用内网页的地区。
- *
- * 除了门户那个分区，默认会话也一并更新：这样以后再加别的内嵌网页
- * 不用记得单独设一次，地区口径始终跟着这个设置走。
- * 默认会话只改 Accept-Language、保留原 UA——UA 是给 Kiro 接口用的，不能动。
- */
-export function setInAppLocale(locale?: string): void {
-  acceptLanguage = acceptLanguageFor(locale)
-
+/** 固定网络语言；保留旧调用签名以兼容已保存的地区设置，但不再跟随它。 */
+export function setInAppLocale(_locale?: string): void {
   electronSession.defaultSession.setUserAgent(
     electronSession.defaultSession.getUserAgent(),
     acceptLanguage
@@ -135,7 +121,7 @@ export function setInAppLocale(locale?: string): void {
 }
 
 /**
- * 配置门户分区：只设 UA 与语言，**不注册任何 webRequest 监听**。
+ * 配置门户分区：确认原生环境，再配置代理、权限、UA 与语言；不注册 webRequest 监听。
  *
  * 这一点对速度是决定性的：一旦注册 webRequest 监听（哪怕回调里什么都不做），
  * Chromium 就必须把每一个请求都经由主进程 IPC 往返一次并等待回调放行。
@@ -148,6 +134,7 @@ export function setInAppLocale(locale?: string): void {
  * 手工改写属于锦上添花，远不值得给所有请求加一跳。
  */
 async function preparePortalSession(proxyUrl: string): Promise<Electron.Session> {
+  assertPortalEnvironment()
   applyGlobalUserAgent()
   const ses = electronSession.fromPartition(`kiro-portal-private-${randomUUID()}`, { cache: false })
   await configurePortalProxy(ses, proxyUrl)

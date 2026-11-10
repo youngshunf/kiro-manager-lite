@@ -1506,12 +1506,7 @@ export interface AppSettings {
   gatewayRetryMaxAttempts: number
   /** 两次尝试之间的固定间隔（ms） */
   gatewayRetryDelayMs: number
-  /**
-   * 内置浏览器（前往官网）访问 Kiro 网页端时使用的地区。
-   *
-   * 同时决定 Accept-Language 请求头与 Chromium 的界面区域，
-   * 后者影响页面里 navigator.language 读到的值——门户按前端语言判断时只有它管用。
-   */
+  /** 兼容旧存储的地区字段；私密网页现固定 en-US，不再由此字段覆盖。 */
   portalLocale: PortalLocale
   /** 仅供新开的私密浏览器窗口使用；留空时禁止打开，不回退系统代理或直连。 */
   portalProxyUrl: string

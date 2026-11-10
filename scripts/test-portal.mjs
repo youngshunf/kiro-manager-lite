@@ -20,9 +20,12 @@ await Promise.all([
   external: ['electron'],
   outfile
 })))
-const env = { ...process.env }
+// The production bootstrap relaunches once if these native startup inputs are absent.
+const env = { ...process.env, TZ: 'America/New_York' }
 delete env.ELECTRON_RUN_AS_NODE
-const result = spawnSync(require('electron'), [join(root, 'tests/portal.electron.cjs'), output], {
+const args = [join(root, 'tests/portal.electron.cjs'), output]
+if (process.platform === 'darwin') args.push('-AppleLanguages', '(en-US,en)')
+const result = spawnSync(require('electron'), args, {
   cwd: root, env, stdio: 'inherit', timeout: 120000
 })
 if (result.error) console.error(result.error)

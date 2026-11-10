@@ -29,12 +29,6 @@ import type {
 } from '@shared/types'
 import ThemeModeIcon from '@/components/common/ThemeModeIcon.vue'
 import LayoutModeIcon from '@/components/common/LayoutModeIcon.vue'
-import {
-  PORTAL_LOCALE_CUSTOM,
-  PORTAL_LOCALE_PRESETS,
-  isPresetPortalLocale,
-  normalizePortalLocale
-} from '@shared/portalLocale'
 import { useSettingsStore } from '@/stores/settings'
 import SettingSwitch from '@/components/common/SettingSwitch.vue'
 import PathMenu from '@/components/common/PathMenu.vue'
@@ -125,68 +119,6 @@ const closeActionOptions: { value: AppSettings['closeAction']; label: string }[]
   { value: 'minimize', label: '最小化到托盘' },
   { value: 'quit', label: '退出程序' }
 ]
-
-const portalLocale = computed(
-  () => settings.value.portalLocale ?? DEFAULT_SETTINGS.portalLocale
-)
-
-/** 预设与主进程共用同一份，末尾追加「自定义」入口 */
-const localeSelectOptions = [
-  ...PORTAL_LOCALE_PRESETS,
-  { value: PORTAL_LOCALE_CUSTOM, label: '自定义…' }
-]
-
-/**
- * 是否处于自定义模式。
- * 初值看当前取值是否落在预设里：手输过 zh-Hant-HK 这类值时，重新进设置页要保持自定义态。
- */
-const localeCustomMode = ref(!isPresetPortalLocale(portalLocale.value))
-
-/** 自定义输入走本地草稿，回车或点保存才提交，避免每敲一个字母写一次设置 */
-const localeDraft = ref(portalLocale.value)
-
-watch(
-  () => settingsStore.settings.portalLocale,
-  (value) => {
-    if (value !== localeDraft.value) localeDraft.value = value
-    // 设置被外部改成非预设值（如恢复默认后再手改）时同步切换模式
-    if (!isPresetPortalLocale(value)) localeCustomMode.value = true
-  }
-)
-
-/** 自定义模式下下拉固定停在「自定义」，否则跟随当前预设 */
-const localeSelectValue = computed(() =>
-  localeCustomMode.value ? PORTAL_LOCALE_CUSTOM : portalLocale.value
-)
-
-/** 支持按地区名或语言标签搜索，输入 ru 或「俄」都能筛到 */
-function filterLocaleOption(input: string, option: { value: string; label: string }): boolean {
-  const keyword = input.trim().toLowerCase()
-  if (!keyword) return true
-  return (
-    option.value.toLowerCase().includes(keyword) || option.label.toLowerCase().includes(keyword)
-  )
-}
-
-function onLocaleSelect(value: string): void {
-  if (value === PORTAL_LOCALE_CUSTOM) {
-    // 只切模式、不动已生效的值：等用户填完再提交，避免中途把地区改成空
-    localeCustomMode.value = true
-    localeDraft.value = portalLocale.value
-    return
-  }
-  localeCustomMode.value = false
-  update({ portalLocale: value })
-}
-
-/** 提交前规范化：与主进程同一套实现，避免界面显示的和实际生效的不一致 */
-function savePortalLocale(): void {
-  const normalized = normalizePortalLocale(localeDraft.value)
-  localeDraft.value = normalized
-  // 填的正好是预设值时收起输入框，回到下拉直选的状态
-  if (isPresetPortalLocale(normalized)) localeCustomMode.value = false
-  if (normalized !== portalLocale.value) update({ portalLocale: normalized })
-}
 
 /** 设置缺失时回落到默认的「最小化到托盘」，避免下拉显示空白 */
 const closeAction = computed(
@@ -635,39 +567,19 @@ function resetAll(): void {
             仅用于内置浏览器，与上方 API 代理独立。留空时必须在打开前填写本次自定义代理，不会回退直连。
           </div>
         </a-form-item>
-        <a-form-item label="浏览器地区" class="field-inline">
-          <a-select
-            :value="localeSelectValue"
-            :options="localeSelectOptions"
-            show-search
-            :filter-option="filterLocaleOption"
-            :get-popup-container="bodyPopupContainer"
-            style="width: 260px"
-            @change="(v: unknown) => onLocaleSelect(String(v))"
-          />
-          <span class="restart-hint">修改地区后需要重启应用才能完全生效</span>
-        </a-form-item>
-        <a-form-item v-if="localeCustomMode" label="自定义标签" class="field-inline">
-          <a-input-group compact>
-            <a-input
-              v-model:value="localeDraft"
-              placeholder="例如 zh-Hant-HK"
-              style="width: 180px"
-              @press-enter="savePortalLocale"
-            />
-            <a-button type="primary" @click="savePortalLocale">保存</a-button>
-          </a-input-group>
-          <span class="muted">当前生效：{{ portalLocale }}</span>
+        <a-form-item label="网页隐私环境">
+          <div id="portal-environment-summary">英语（en-US） · 纽约时区（America/New_York）</div>
+          <div class="choice-hint">仅 macOS 已验证；其他平台禁止打开私密网页。固定语言与时区，拒绝本机定位，不修改系统设置。</div>
         </a-form-item>
       </a-form>
       <ul class="tips">
         <li>每次打开都新建独立的 Chromium 私密会话；官网入口自动登录当前账号，不复用其他窗口的登录状态。</li>
         <li>打开前可使用全局浏览器代理，或填写仅本次生效的代理；账号默认代理会预填到本次自定义输入中。代理不可用时不会回退直连，全局修改只影响之后新开的窗口。</li>
         <li>HTTP 代理支持用户名/密码（user:pass），SOCKS 代理不支持用户名/密码。代理地址可能包含密码，请勿向他人分享。</li>
-        <li>浏览器地区作用于应用内打开的所有网页（含「前往官网」及其弹出的窗口），决定 Accept-Language 与页面区域，影响显示的语言与价格币种。</li>
-        <li>下拉支持搜索，可按地区名或语言标签筛选；选「自定义」后可填任意 BCP 47 标签。</li>
-        <li>Accept-Language 保存后立即生效；页面内 navigator.language 由 Chromium 启动参数决定，需重启应用。</li>
-        <li>不改变本应用自身的界面语言，也不影响账号所属的 AWS 区域。</li>
+        <li>网页及 Worker 使用美式英语和纽约时区（自动遵守夏令时）；旧的浏览器地区设置不再覆盖此隐私策略。首次启动可能自动重启一次以应用进程级环境。</li>
+        <li>拒绝网站的本机定位、摄像头、麦克风、传感器、设备访问及本地字体枚举等权限；操作系统与浏览器漏洞不在此保证范围内。</li>
+        <li>代理出口的国家由代理服务决定；固定语言/时区不等于美国 IP，也不保证网站无法识别代理、Electron 或其他设备特征。</li>
+        <li>本应用界面仍使用中文；不修改系统设置或账号所属的 AWS 区域。应用进程日期显示可能按纽约时区格式化。</li>
       </ul>
     </a-card>
 

@@ -39,7 +39,8 @@ async function navigateWithToolbar(page, url) {
   const bar = toolbarFor(page)
   await bar.executeJavaScript(`document.getElementById('url').value=${JSON.stringify(url)}`)
   await clickToolbar(page, 'go')
-  await until(() => page.getURL() === url && !page.isLoading(), 'address-bar navigation')
+  await until(() => page.getURL() === url && !page.isLoading(), `address-bar navigation: ${url}`)
+    .catch(async error => { throw new Error(`${error.message}; page=${page.getURL()}; route=${await page.session.resolveProxy(url)}`) })
 }
 function proxyServer(label, tunnels, password) {
   const hits = []
@@ -86,19 +87,32 @@ function proxyServer(label, tunnels, password) {
 }
 
 async function main() {
+  const portal = require(process.argv[2])
   await app.whenReady()
   // No real account traffic: HTTPS portal pages are fixtures; HTTP exercises actual Chromium sockets.
   app.on('session-created', ses => {
     ses.protocol.handle('https', () => new Response('<title>Account fixture</title>', { headers: { 'Content-Type': 'text/html' } }))
   })
-  const portal = require(process.argv[2])
   const tunnels = new Set(), arrivals = []
   const targetServer = http.createServer((req, res) => {
-    arrivals.push({ path: req.url, proxy: req.headers['x-test-proxy'] || (tunnels.has(req.socket.remotePort) ? 'tunnel' : 'DIRECT') })
+    arrivals.push({ path: req.url, ua: req.headers['user-agent'], language: req.headers['accept-language'], proxy: req.headers['x-test-proxy'] || (tunnels.has(req.socket.remotePort) ? 'tunnel' : 'DIRECT') })
     res.setHeader('Cache-Control', 'no-store')
     if (req.url === '/resource') { res.end('resource-ok'); return }
+    const readEnvironment = `({zone:Intl.DateTimeFormat().resolvedOptions().timeZone,locale:Intl.DateTimeFormat().resolvedOptions().locale,language:navigator.language,languages:[...navigator.languages],winterOffset:new Date('2026-01-15T12:00:00Z').getTimezoneOffset(),summerOffset:new Date('2026-07-15T12:00:00Z').getTimezoneOffset()})`
+    if (req.url === '/worker.js' || req.url === '/shared.js' || req.url === '/sw.js') {
+      res.setHeader('Content-Type', 'application/javascript')
+      const snapshot = `const snapshot=${readEnvironment};`
+      if (req.url === '/worker.js') res.end(snapshot+'postMessage(snapshot)')
+      else if (req.url === '/shared.js') res.end(snapshot+'onconnect=e=>e.ports[0].postMessage(snapshot)')
+      else res.end(snapshot+`addEventListener('install',e=>e.waitUntil(skipWaiting()));addEventListener('activate',e=>e.waitUntil(clients.claim()));addEventListener('message',e=>e.ports[0].postMessage(snapshot))`)
+      return
+    }
     res.setHeader('Content-Type', 'text/html')
-    res.end(`<title>Local portal fixture</title><img src="/image"><iframe src="/frame"></iframe>`)
+    if (req.url === '/cross-frame') {
+      res.end(`<script>parent.postMessage({kind:'cross-frame-environment',environment:${readEnvironment}},'*')</script>`)
+      return
+    }
+    res.end(`<title>Local portal fixture</title><script>window.firstEnvironment=${readEnvironment}</script><img src="/image"><iframe src="/frame"></iframe>`)
   })
   targetServer.on('upgrade', (req, socket) => {
     arrivals.push({ path: req.url, proxy: tunnels.has(req.socket.remotePort) ? 'tunnel' : req.headers['x-test-proxy'] || 'DIRECT' })
@@ -113,6 +127,21 @@ async function main() {
   const a = proxyServer('A', tunnels), b = proxyServer('B', tunnels)
   await listen(a.server); await listen(b.server)
   try {
+    // Real Session API + HTTP arrival: catch proxy preference propagation races
+    // when a protocol handler initialized the NetworkContext before setProxy.
+    for (let iteration = 0; iteration < 200; iteration++) {
+      let createdSession
+      app.once('session-created', ses => { createdSession = ses })
+      const login = await portal.createLoginBrowser(a.url(), () => false)
+      try {
+        assert.equal(await createdSession.resolveProxy(target), `PROXY 127.0.0.1:${a.server.address().port}`, `new login session proxy ready at iteration ${iteration}`)
+        const response = await login.request(`${target}/resource`)
+        assert.equal(response.status, 200)
+        assert.equal(await response.text(), 'resource-ok')
+        assert.equal(arrivals.at(-1)?.proxy, 'A', 'first login request must use its explicit proxy')
+      } finally { await login.close() }
+    }
+    console.log('PASS 200 fresh sessions synchronize proxy configuration before first request')
     const existingWindows = new Set(BaseWindow.getAllWindows())
     const first = await opened(() => portal.openInAppUrl(target, 'Test A', { proxyUrl: a.url() }))
     const rootWindow = BaseWindow.getAllWindows().find(win => !existingWindows.has(win))
@@ -122,6 +151,55 @@ async function main() {
     assert.equal(await first.session.resolveProxy(target), `PROXY 127.0.0.1:${a.server.address().port}`)
     await until(() => arrivals.some(row => row.proxy === 'A') && arrivals.some(row => row.proxy === 'B'), 'both proxies used')
     await until(() => first.getTitle() === 'Local portal fixture', 'first page loaded')
+    // Snapshot captured by the first page script, not a late injected property shim.
+    const environment = await first.executeJavaScript('window.firstEnvironment')
+    const userAgent = await first.executeJavaScript('navigator.userAgent')
+    assert.doesNotMatch(userAgent, /Electron|kiro-account-lite/i)
+    assert.match(userAgent, new RegExp(`Chrome/${process.versions.chrome.split('.')[0]}\\.`))
+    assert.equal(arrivals.find(row => row.path === '/')?.ua, userAgent, 'HTTP and JS UA match without Electron token')
+    assert.equal(environment.zone, 'America/New_York', 'websites must not inherit the system timezone')
+    assert.equal(environment.locale, 'en-US')
+    assert.equal(environment.language, 'en-US')
+    assert.deepEqual(environment.languages, ['en-US', 'en'])
+    assert.equal(environment.winterOffset, 300)
+    assert.equal(environment.summerOffset, 240)
+    assert.match(arrivals.find(row => row.path === '/')?.language || '', /^en-US,en;q=0\.9$/)
+    await until(() => first.executeJavaScript(`!!document.querySelector('iframe').contentWindow.firstEnvironment`), 'iframe environment')
+    assert.deepEqual(await first.executeJavaScript(`document.querySelector('iframe').contentWindow.firstEnvironment`), environment)
+    const crossFrameEnvironment = await first.executeJavaScript(`new Promise((resolve,reject)=>{
+      const timer=setTimeout(()=>reject(Error('cross-origin frame timeout')),4000)
+      const frame=document.createElement('iframe')
+      const listener=event=>{if(event.source===frame.contentWindow && event.data?.kind==='cross-frame-environment'){clearTimeout(timer);removeEventListener('message',listener);frame.remove();resolve(event.data.environment)}}
+      addEventListener('message',listener)
+      frame.src=${JSON.stringify(`${target.replace('127.0.0.1', 'localhost')}/cross-frame`)}
+      document.body.appendChild(frame)
+    })`)
+    assert.deepEqual(crossFrameEnvironment, environment, 'cross-site iframe first script uses fixed native environment')
+    for (const kind of ['dedicated', 'shared', 'service']) {
+      const observed = await first.executeJavaScript(`new Promise(async (resolve,reject)=>{
+        const timer=setTimeout(()=>reject(Error('worker environment timeout')),4000)
+        const done=e=>{clearTimeout(timer);resolve(e.data)}
+        try {
+          if(${JSON.stringify(kind)}==='dedicated') {
+            const worker=new Worker('/worker.js');worker.onmessage=e=>{worker.terminate();done(e)};worker.onerror=reject
+          } else if(${JSON.stringify(kind)}==='shared') {
+            const worker=new SharedWorker('/shared.js');worker.port.onmessage=e=>{worker.port.close();done(e)};worker.onerror=reject;worker.port.start()
+          } else {
+            await navigator.serviceWorker.register('/sw.js')
+            const registration=await navigator.serviceWorker.ready
+            const channel=new MessageChannel();channel.port1.onmessage=async e=>{await registration.unregister();done(e)}
+            registration.active.postMessage('environment',[channel.port2])
+          }
+        } catch(error) {clearTimeout(timer);reject(error)}
+      })`)
+      // Chromium may reduce a shared worker's fallback list to just its primary language.
+      assert.equal(observed.language, 'en-US', `${kind} primary language`)
+      assert(observed.languages.length > 0 && observed.languages.every(language => ['en-US','en'].includes(language)), `${kind} worker must expose only English language tags`)
+      assert.deepEqual({...observed,languages:environment.languages}, environment, `${kind} worker must not expose host timezone or locale`)
+    }
+    assert.equal(await first.executeJavaScript(`navigator.permissions.query({name:'geolocation'}).then(p=>p.state)`), 'denied')
+    assert.equal(await first.executeJavaScript(`new Promise(resolve=>navigator.geolocation.getCurrentPosition(()=>resolve('unexpected location'),error=>resolve(error.code),{timeout:2000}))`), 1, 'OS location denied before lookup')
+    console.log('PASS US English, New York timezone with daylight savings and denied OS geolocation')
     // Real toolbar -> preload -> IPC: no new partition and no lost form state.
     await first.executeJavaScript(`document.body.insertAdjacentHTML('beforeend','<input id="draft" value="unfinished">'); document.cookie='ToolbarProgress=fixture; path=/'; localStorage.setItem('draft','in-progress')`)
     portal.setSettings({ portalProxyUrl: b.url() })
@@ -154,6 +232,12 @@ async function main() {
     const oauth = await opened(() => first.executeJavaScript(`window.open('${target}/oauth'); undefined`, true))
     assert.equal(oauth.session, first.session)
     await until(() => arrivals.some(row => row.path === '/oauth'), 'oauth popup request')
+    await until(() => oauth.executeJavaScript('!!window.firstEnvironment'), 'native popup first-script environment')
+    assert.deepEqual(await oauth.executeJavaScript('window.firstEnvironment'), environment)
+    assert.equal(await oauth.executeJavaScript('navigator.userAgent'), userAgent)
+    assert.equal(await popup.executeJavaScript('navigator.userAgent'), userAgent)
+    assert.equal(await companion.executeJavaScript('navigator.userAgent'), userAgent)
+    console.log('PASS native popup first script shares fixed environment; HTTP/page/child UA contain no Electron token')
     const ws = await first.executeJavaScript(`new Promise((resolve, reject) => { const ws = new WebSocket('${target.replace('http:', 'ws:')}/socket'); ws.onmessage = e => { resolve(e.data); ws.close() }; ws.onerror = () => reject(new Error('websocket failed')) })`)
     assert.equal(ws, 'ok')
     assert.equal(arrivals.filter(row => row.proxy === 'DIRECT').length, 0, 'no request may bypass its proxy')

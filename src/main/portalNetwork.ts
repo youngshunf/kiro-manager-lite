@@ -76,6 +76,9 @@ export async function configurePortalProxy(ses: Electron.Session, input: string)
     // Chromium otherwise bypasses proxies implicitly for localhost / loopback.
     proxyBypassRules: '<-loopback>'
   })
+  // setProxy resolves after updating preferences, before an already-created NetworkContext
+  // necessarily observes them. Wait for its acknowledgement before any website/request.
+  await ses.forceReloadProxyConfig()
   proxies.set(ses, proxy)
   ses.setPermissionCheckHandler((_wc, permission) => permission === 'fullscreen')
   ses.setPermissionRequestHandler((_wc, permission, callback) => callback(permission === 'fullscreen'))

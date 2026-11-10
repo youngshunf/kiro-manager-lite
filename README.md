@@ -28,9 +28,10 @@
 本 fork 基于 [lucks-cloud/kiro-manager-lite](https://github.com/lucks-cloud/kiro-manager-lite)，保留原作者署名及 AGPL-3.0 许可证。
 
 - 仓库：[youngshunf/kiro-manager-lite](https://github.com/youngshunf/kiro-manager-lite)，工作分支：`feat/private-browser-proxy`。
-- 定制版本：`1.0.49-proxy.3`，包含每次独立私密浏览器会话、账号自动登录、全局 / 账号默认 / 本次代理与失败不直连；支持添加账号时指定并保存代理；新增工具条「＋ 同环境新窗口」和「Outlook 注册」，复用当前私密会话和代理，不覆盖原授权页面。
+- 定制版本：`1.0.49-proxy.4`，包含每次独立私密浏览器会话、账号自动登录、全局 / 账号默认 / 本次代理与失败不直连；支持添加账号时指定并保存代理；工具条「＋ 同环境新窗口」和「Outlook 注册」复用当前私密会话和代理，不覆盖原授权页面。
+- 本版新增固定隐私环境：网页使用美式英语和纽约时区、拒绝网站定位，并在首个请求前等待网络上下文确认代理配置。目前仅在 macOS 验证；未验证的平台禁止创建私密网页会话，不会悄悄回退到系统地区。其他平台仍可使用不依赖该浏览器的功能。
 - 应用内更新只检查本 fork 的 Releases，避免安装上游包后丢失定制功能；尚未发布 fork Release 时不提供可安装更新。
-- 验证：`npm run test:portal`、`npm run test:add-account`、`npm run build`。添加账号测试使用临时数据目录、虚构凭证和本地代理，不会读取真实账号或执行真实身份提供商授权。本机 macOS arm64 的 ad-hoc 签名打包：在项目根目录运行 `CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --mac --arm64 --dir --publish never -c.mac.identity=-`（先运行 build；不使用本机开发者证书，也不发布 Release）。
+- 验证：`npm run test:portal`、`npm run test:add-account`、`npm run test:portal-startup`（macOS 原生冷启动 / 自动重启 / 失败关闭）、`npm run build`。添加账号测试使用临时数据目录、虚构凭证和本地代理，不会读取真实账号或执行真实身份提供商授权。本机 macOS arm64 的 ad-hoc 签名打包：在项目根目录运行 `CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --mac --arm64 --dir --publish never -c.mac.identity=-`（先运行 build；不使用本机开发者证书，也不发布 Release）。
 
 ## ✨ 功能特性
 
@@ -90,7 +91,10 @@
 - 工具条「＋ 同环境新窗口」打开空白窗口，可在地址栏输入任意 HTTP(S) 网址；「Outlook 注册」在新窗口打开微软官方 `https://signup.live.com/signup`，邮箱注册由用户手动完成。两者都复用当前私密 Session 和已锁定的代理，不覆盖原页面或表单，也不会改用后来修改的全局代理。这是同环境多窗口，不是窗口内标签页栏；站点存储仍遵守同源隔离
 - 添加账号时可用上述入口先注册邮箱，再回到 AWS / 其他授权页面继续；本次登录完成或取消会关闭该会话的所有窗口并清理临时数据，请在结束授权前完成需要的邮箱操作。下一次添加账号仍是全新隔离环境
 - 首屏卡住会自动重试并把进度显示在标题位，次数用尽才给错误页，不再干等 30 秒白屏
-- 请求头伪装成普通 Chrome，并可在设置的「内置浏览器」里指定地区（内置 50 个常用地区，也支持自定义 BCP 47 标签）
+- 网页 UA 使用与真实 Chromium 主版本一致的稳定 Chrome UA，不含 Electron / 应用名 token；同一会话内保持一致，不随机轮换 UA，也不保证网站无法识别 Electron 或代理
+- **当前源码的固定隐私环境（macOS）**：网页的 `Intl` / `Date` 使用 `America/New_York`（含夏令时），`navigator.language` 为 `en-US`，语言列表仅含英语，请求头为 `en-US,en;q=0.9`。已用页面首段脚本、同源 / 跨站 iframe、Dedicated / Shared / Service Worker 与原生登录弹窗验证；SharedWorker 可仅返回主语言 `en-US`
+- 原生环境须在创建网页前初始化；普通启动会自动重启一次，保留命令行参数和数据目录，不更改系统语言、时区或持久 defaults。旧 `portalLocale` 仅保留存储兼容，不再覆盖固定策略；应用中文界面及 AWS 区域不变，但应用进程的日期显示也可能使用纽约时区
+- 拒绝网站的地理定位、摄像头、麦克风、传感器、设备及本地字体枚举等权限；定位调用返回权限拒绝，而不是伪造美国坐标。网络出口国家仍由代理决定；字体渲染、GPU、屏幕及其他设备特征不在隐藏保证内，也不保证浏览器 / 操作系统漏洞下的绝对隔离
 
 ### 🔑 API Key 管理
 
@@ -185,8 +189,7 @@
 - **隐私打码**：一键遮住邮箱、昵称、API Key、User ID、备注与分组标签，截图或录屏前很有用。
   列表工具栏「隐私打码」旁的设置图标可分别为账号与 API Key 勾选打码内容（账号的邮箱、API Key 的 Key 始终打码）；
   邮箱的遮罩串由 md5 前缀生成，同一账号每次结果一致，打码状态下仍能横向比对是不是同一个号
-- **内置浏览器**：指定应用内打开的网页使用哪个地区，50 个常用地区可搜索选择，也可自定义 BCP 47 标签。
-  只影响应用内的网页，不改界面语言、也不影响账号所属的 AWS 区域
+- **内置浏览器**：配置全局浏览器代理，查看固定的英语 / 纽约时区隐私环境和权限边界；不再提供可覆盖隐私策略的地区下拉。固定环境目前仅在 macOS 验证，其他平台的私密浏览器入口拒绝打开；不改中文界面或账号所属的 AWS 区域
 - Token / 用量自动刷新间隔、主动续期、批量与导入并发数
 - **数据管理**：账号、Kiro API Key、账号与 API Key 的用量记录、反代 API Key 导出为明文 `.json`（带导出时间与版本），导入时只替换文件里带的部分；
   「初始化」清掉全部数据并还原改过的外部配置，和初次安装一样；备份计划默认开启，每 30 分钟静默备份一次、保留最新 3 份，周期与份数可改
@@ -402,7 +405,7 @@ src/
     refreshPolicy.ts     刷新跳过策略（手动 / 自动共用一份）
     retryPolicy.ts       网关重试的状态码口径
     regions.ts           AWS 区域列表与分组
-    portalLocale.ts      内置浏览器地区：预设、归一化、Accept-Language
+    portalLocale.ts      旧浏览器地区字段的存储兼容与归一化
     subscription.ts      订阅档位归一
     modelSchema.ts       从模型 schema 解析推理档位并拼请求字段
     proxyModels.ts       反代的模型名映射与兜底模型表
@@ -437,7 +440,9 @@ src/
     kiroPermissions.ts   自动同意 AI 操作：两套机制读写与还原
     kiroCapability.ts    当前 IDE 版本是否支持自定义网关端点
     kiroProcess.ts       IDE 进程检测、打开、关闭与重启
-    kiroPortal.ts        内置浏览器：私密窗口、工具条、看门狗重试与地区
+    kiroPortal.ts        内置浏览器：私密窗口、同环境工具条与看门狗重试
+    portalEnvironment.ts 固定网页语言 / 时区的原生启动环境（macOS）
+    portalNetwork.ts     会话强制代理、配置同步屏障、权限拒绝与登录请求
     ── API Key 网关
     keyService.ts        Key 管理与网关编排
     keyGateway.ts        本地 KRS / CPS 转发

@@ -23,6 +23,7 @@ import { isSocialIdp } from '@/utils/transfer'
 import { copyText } from '@/utils/ui'
 import { DEFAULT_REGION } from '@shared/regions'
 import type {
+  BrowserOpenInfo,
   IdpType,
   IpcResult,
   LoginPollResult,
@@ -46,23 +47,21 @@ const step = ref<Step>('method')
 const submitting = ref(false)
 const loadingLocal = ref(false)
 
-/** 无痕开关跟随全局设置，改动即持久化，下次打开沿用上次选择 */
-const privateMode = computed({
-  get: () => settingsStore.settings.loginPrivateMode,
-  set: (value: boolean) => void settingsStore.update({ loginPrivateMode: value })
-})
+/** 每次打开只复制一次全局默认值，编辑仅作用于本次单个账号添加。 */
+const portalProxyUrl = ref('')
 
 // 在线登录进行中的状态
 const waiting = reactive({
   method: 'BuilderId' as OnlineLoginMethod,
   hint: '',
   userCode: '',
-  verificationUri: '',
   error: '',
   /** 正在启动浏览器，尚未确认是否打开成功 */
   opening: false,
-  /** 请求无痕时是否真的用无痕窗口打开 */
-  openedPrivately: false
+  /** 开始授权时锁定，等待期间不可修改。 */
+  proxyUrl: '',
+  /** 是否已打开代理内置无痕浏览器。 */
+  proxied: false
 })
 
 const enterpriseForm = reactive({
@@ -84,7 +83,7 @@ const methods = [
   {
     key: 'online' as const,
     title: '在线登录',
-    desc: '打开浏览器授权，自动获取凭证',
+    desc: '使用代理内置无痕浏览器授权，自动获取凭证',
     icon: GlobalOutlined,
     recommended: true
   },
@@ -158,8 +157,8 @@ const PROVIDER_OPTIONS: { value: IdpType; label: string }[] = [
 
 /** 各步骤的标题与副标题；waiting 步骤的副标题是实时提示，单独取 */
 const STEP_TEXT: Record<Step, { title: string; sub: string }> = {
-  method: { title: '添加账号', sub: '选择一种方式来添加你的 Kiro 账号' },
-  online: { title: '选择登录方式', sub: '浏览器授权完成后会自动回到应用' },
+  method: { title: '添加账号', sub: '设置单个账号的代理，再选择添加方式' },
+  online: { title: '选择登录方式', sub: '通过代理内置无痕浏览器授权，完成后自动添加' },
   enterprise: { title: 'Enterprise SSO', sub: '填写组织的 IAM Identity Center 地址' },
   waiting: { title: '等待浏览器授权', sub: '' },
   oidc: { title: '凭证信息', sub: '确认凭证后会联网校验并拉取用量' },
@@ -182,6 +181,11 @@ const stepSub = computed(() =>
 
 let pollTimer: ReturnType<typeof setTimeout> | null = null
 let unsubscribeSocial: (() => void) | null = null
+let loginAttempt = 0
+
+function isCurrentLogin(attempt: number): boolean {
+  return props.open && step.value === 'waiting' && attempt === loginAttempt
+}
 
 function stopPolling(): void {
   if (pollTimer) clearTimeout(pollTimer)
@@ -189,34 +193,47 @@ function stopPolling(): void {
 }
 
 function teardownLogin(): void {
+  loginAttempt++
+  submitting.value = false
   stopPolling()
   unsubscribeSocial?.()
   unsubscribeSocial = null
   void window.api.cancelLogin()
 }
 
-/**
- * 进入「等待授权」步骤：三种在线登录方式的起手动作完全一致，
- * 都要清掉上一轮的验证码 / 错误并把提示切回「正在打开浏览器」。
- */
-function beginWaiting(method: OnlineLoginMethod): void {
+function requireOnlineProxy(): boolean {
+  if (portalProxyUrl.value.trim()) return true
+  message.warning('在线登录必须填写代理地址，不会回退到直连或外部浏览器')
+  return false
+}
+
+/** 开始授权时锁定代理，并丢弃前一轮异步结果。 */
+function beginWaiting(method: OnlineLoginMethod): number {
+  const attempt = ++loginAttempt
   waiting.method = method
+  waiting.proxyUrl = portalProxyUrl.value.trim()
+  waiting.proxied = false
   waiting.opening = true
-  waiting.hint = '正在打开浏览器，请稍候…'
+  waiting.hint = '正在打开代理内置无痕浏览器，请稍候…'
   waiting.error = ''
   waiting.userCode = ''
+  submitting.value = false
   step.value = 'waiting'
+  return attempt
 }
 
 function resetAll(): void {
+  loginAttempt++
   step.value = 'method'
   submitting.value = false
+  loadingLocal.value = false
   waiting.hint = ''
   waiting.userCode = ''
-  waiting.verificationUri = ''
   waiting.error = ''
   waiting.opening = false
-  waiting.openedPrivately = false
+  waiting.proxyUrl = ''
+  waiting.proxied = false
+  portalProxyUrl.value = settingsStore.settings.portalProxyUrl.trim()
   enterpriseForm.startUrl = settingsStore.settings.enterpriseStartUrl
   enterpriseForm.region = settingsStore.settings.enterpriseRegion || DEFAULT_REGION
   form.refreshToken = ''
@@ -230,29 +247,47 @@ function resetAll(): void {
 
 watch(
   () => props.open,
-  (open) => {
+  (open, previousOpen) => {
     if (open) resetAll()
-    else teardownLogin()
-  }
+    else if (previousOpen) teardownLogin()
+  },
+  { immediate: true }
 )
 
 onUnmounted(teardownLogin)
 
 function close(): void {
+  loginAttempt++
   emit('update:open', false)
 }
 
 // ============ 在线登录 ============
 
-async function finishOnline(credentials: OnlineLoginCredentials): Promise<void> {
-  waiting.hint = '正在获取账号信息…'
-  const res = await accountsStore.addByOnlineLogin(credentials)
-  if (!res.ok) {
-    waiting.error = res.error || '添加失败'
-    return
+async function finishOnline(credentials: OnlineLoginCredentials, attempt: number): Promise<void> {
+  if (!isCurrentLogin(attempt) || submitting.value) return
+  stopPolling()
+  unsubscribeSocial?.()
+  unsubscribeSocial = null
+  submitting.value = true
+  waiting.hint = '正在通过代理校验凭证并获取账号信息…'
+  try {
+    const res = await accountsStore.addByOnlineLogin(
+      credentials,
+      { portalProxyUrl: credentials.portalProxyUrl?.trim() || waiting.proxyUrl },
+      () => isCurrentLogin(attempt)
+    )
+    if (!isCurrentLogin(attempt)) return
+    if (!res.ok) {
+      waiting.error = res.error || '添加失败'
+      return
+    }
+    message.success(`已添加 ${res.account?.email}`)
+    close()
+  } catch {
+    if (isCurrentLogin(attempt)) waiting.error = '代理校验失败，请重试'
+  } finally {
+    if (isCurrentLogin(attempt)) submitting.value = false
   }
-  message.success(`已添加 ${res.account?.email}`)
-  close()
 }
 
 /** Enterprise 授权码回调由本地服务器接收，轮询只是取结果，间隔可以短一些 */
@@ -267,107 +302,151 @@ const SLOW_DOWN_STEP_MS = 5000
  */
 function pollLogin(
   request: () => Promise<IpcResult<LoginPollResult>>,
-  intervalMs: number
+  intervalMs: number,
+  attempt: number
 ): void {
   pollTimer = setTimeout(async () => {
-    const res = await request()
-    if (!res.success) {
-      waiting.error = res.error || '授权失败'
-      return
+    if (!isCurrentLogin(attempt)) return
+    try {
+      const res = await request()
+      if (!isCurrentLogin(attempt)) return
+      if (!res.success) {
+        waiting.error = res.error || '授权失败'
+        return
+      }
+      if (res.data?.completed && res.data.credentials) {
+        await finishOnline(res.data.credentials, attempt)
+        return
+      }
+      pollLogin(request, res.data?.slowDown ? intervalMs + SLOW_DOWN_STEP_MS : intervalMs, attempt)
+    } catch {
+      if (isCurrentLogin(attempt)) waiting.error = '获取授权结果失败，请重试'
     }
-    if (res.data?.completed && res.data.credentials) {
-      stopPolling()
-      await finishOnline(res.data.credentials)
-      return
-    }
-    pollLogin(request, res.data?.slowDown ? intervalMs + SLOW_DOWN_STEP_MS : intervalMs)
   }, intervalMs)
 }
 
 async function startSocial(provider: 'Google' | 'Github'): Promise<void> {
-  beginWaiting(provider)
+  if (!requireOnlineProxy()) return
+  const attempt = beginWaiting(provider)
 
   unsubscribeSocial?.()
   unsubscribeSocial = window.api.onSocialCallback(async (payload) => {
+    if (!isCurrentLogin(attempt)) return
     if (payload.error) {
       waiting.error = `授权失败：${payload.error}`
       return
     }
     if (!payload.code || !payload.state) return
-    waiting.hint = '正在交换 Token…'
-    const res = await window.api.completeSocialLogin(payload.code, payload.state)
-    if (!res.success || !res.data) {
-      waiting.error = res.error || 'Token 交换失败'
-      return
+    waiting.hint = '正在通过代理交换 Token…'
+    try {
+      const res = await window.api.completeSocialLogin(payload.code, payload.state)
+      if (!isCurrentLogin(attempt)) return
+      if (!res.success || !res.data) {
+        waiting.error = res.error || 'Token 交换失败'
+        return
+      }
+      await finishOnline(res.data, attempt)
+    } catch {
+      if (isCurrentLogin(attempt)) waiting.error = 'Token 交换失败，请重试'
     }
-    await finishOnline(res.data)
   })
 
-  const res = await window.api.startSocialLogin(provider, privateMode.value)
-  waiting.opening = false
-  if (!res.success) {
-    waiting.error = res.error || '启动登录失败'
-    return
+  try {
+    const res = await window.api.startSocialLogin(provider, true, { proxyUrl: waiting.proxyUrl })
+    if (!isCurrentLogin(attempt)) return
+    waiting.opening = false
+    if (!res.success || !res.data) {
+      waiting.error = res.error || '启动登录失败'
+      return
+    }
+    applyOpenInfo(res.data)
+  } catch {
+    if (isCurrentLogin(attempt)) {
+      waiting.opening = false
+      waiting.error = '启动代理登录失败，请检查代理后重试'
+    }
   }
-  waiting.verificationUri = res.data?.loginUrl ?? ''
-  waiting.hint = '已打开浏览器，请完成登录后自动返回'
-  applyOpenInfo(res.data)
 }
 
-/** 根据实际打开方式更新提示，无痕失败时明确告知已回退 */
-function applyOpenInfo(info?: { privateMode: boolean; browser?: string }): void {
-  if (!privateMode.value) return
-  if (info?.privateMode) {
-    waiting.hint = `已在 ${info.browser ?? '浏览器'} 无痕窗口打开，请完成登录后自动返回`
-    waiting.openedPrivately = true
+/** 代理登录只使用内置无痕浏览器，不提示外部浏览器回退。 */
+function applyOpenInfo(info?: BrowserOpenInfo): void {
+  waiting.proxied = !!info?.proxied
+  if (!waiting.proxied) {
+    waiting.error = '未确认代理浏览器已打开，请返回检查代理后重试'
     return
   }
-  waiting.openedPrivately = false
-  waiting.hint = '没找到支持无痕的浏览器，已用默认浏览器打开（可能复用已登录身份）'
+  waiting.hint = waiting.userCode
+    ? '已打开代理内置无痕浏览器，请确认下方验证码后完成授权'
+    : '已打开代理内置无痕浏览器，请完成授权后自动返回'
 }
 
 async function startBuilderId(): Promise<void> {
-  beginWaiting('BuilderId')
+  if (!requireOnlineProxy()) return
+  const attempt = beginWaiting('BuilderId')
 
-  const res = await window.api.startBuilderIdLogin(DEFAULT_REGION, privateMode.value)
-  waiting.opening = false
-  if (!res.success || !res.data) {
-    waiting.error = res.error || '启动登录失败'
-    return
+  try {
+    const res = await window.api.startBuilderIdLogin(DEFAULT_REGION, true, { proxyUrl: waiting.proxyUrl })
+    if (!isCurrentLogin(attempt)) return
+    waiting.opening = false
+    if (!res.success || !res.data) {
+      waiting.error = res.error || '启动登录失败'
+      return
+    }
+    waiting.userCode = res.data.userCode
+    applyOpenInfo(res.data)
+    if (waiting.error) return
+    pollLogin(window.api.pollBuilderIdLogin, Math.max(2, res.data.interval) * 1000, attempt)
+  } catch {
+    if (isCurrentLogin(attempt)) {
+      waiting.opening = false
+      waiting.error = '启动代理登录失败，请检查代理后重试'
+    }
   }
-  waiting.userCode = res.data.userCode
-  waiting.verificationUri = res.data.verificationUri
-  waiting.hint = '已打开浏览器，请确认下方验证码后完成授权'
-  applyOpenInfo(res.data)
-  pollLogin(window.api.pollBuilderIdLogin, Math.max(2, res.data.interval) * 1000)
 }
 
 async function startEnterprise(): Promise<void> {
+  if (!requireOnlineProxy()) return
   if (!/^https:\/\//i.test(enterpriseForm.startUrl.trim())) {
     return void message.warning('请填写以 https:// 开头的 SSO Start URL')
   }
-  beginWaiting('Enterprise')
+  const attempt = beginWaiting('Enterprise')
 
   const startUrl = enterpriseForm.startUrl.trim()
-  // 记住本次填写的地址与区域，下次打开自动回填
+  // 记住本次填写的地址与区域，下次打开自动回填；不改全局代理。
   void settingsStore.update({
     enterpriseStartUrl: startUrl,
     enterpriseRegion: enterpriseForm.region
   })
 
-  const res = await window.api.startEnterpriseLogin(startUrl, enterpriseForm.region, privateMode.value)
-  waiting.opening = false
-  if (!res.success || !res.data) {
-    waiting.error = res.error || '启动登录失败'
-    return
+  try {
+    const res = await window.api.startEnterpriseLogin(startUrl, enterpriseForm.region, true, {
+      proxyUrl: waiting.proxyUrl
+    })
+    if (!isCurrentLogin(attempt)) return
+    waiting.opening = false
+    if (!res.success || !res.data) {
+      waiting.error = res.error || '启动登录失败'
+      return
+    }
+    applyOpenInfo(res.data)
+    if (waiting.error) return
+    pollLogin(window.api.pollEnterpriseLogin, ENTERPRISE_POLL_MS, attempt)
+  } catch {
+    if (isCurrentLogin(attempt)) {
+      waiting.opening = false
+      waiting.error = '启动代理登录失败，请检查代理后重试'
+    }
   }
-  waiting.verificationUri = res.data.authorizeUrl
-  waiting.hint = '已打开浏览器，请在 IAM Identity Center 中完成授权'
-  applyOpenInfo(res.data)
-  pollLogin(window.api.pollEnterpriseLogin, ENTERPRISE_POLL_MS)
+}
+
+function pickMethod(key: 'online' | 'oidc' | 'local'): void {
+  if (key === 'online' && !requireOnlineProxy()) return
+  if (key === 'local') return void loadFromLocalKiro()
+  step.value = key
 }
 
 function pickProvider(key: OnlineLoginMethod): void {
+  if (!requireOnlineProxy()) return
   if (key === 'Google' || key === 'Github') return void startSocial(key)
   if (key === 'BuilderId') return void startBuilderId()
   step.value = 'enterprise'
@@ -389,7 +468,11 @@ function backToOnline(): void {
 
 function goBack(): void {
   if (step.value === 'waiting' || step.value === 'enterprise') backToOnline()
-  else step.value = 'method'
+  else {
+    loginAttempt++
+    submitting.value = false
+    step.value = 'method'
+  }
 }
 
 function copyUserCode(): void {
@@ -398,17 +481,33 @@ function copyUserCode(): void {
 }
 
 async function reopenBrowser(): Promise<void> {
-  if (!waiting.verificationUri) return
-  const res = await window.api.openExternal(waiting.verificationUri, privateMode.value)
-  if (res.success) applyOpenInfo(res.data)
+  if (waiting.opening || submitting.value) return
+  const attempt = loginAttempt
+  waiting.opening = true
+  try {
+    const res = await window.api.reopenLoginBrowser()
+    if (!isCurrentLogin(attempt)) return
+    if (!res.success) {
+      waiting.error = res.error || '重新打开代理浏览器失败'
+      return
+    }
+    applyOpenInfo(res.data)
+  } catch {
+    if (isCurrentLogin(attempt)) waiting.error = '重新打开代理浏览器失败，请重试'
+  } finally {
+    if (isCurrentLogin(attempt)) waiting.opening = false
+  }
 }
 
 // ============ 本地凭证 / 手动凭证 ============
 
 async function loadFromLocalKiro(): Promise<void> {
+  if (loadingLocal.value) return
+  const attempt = loginAttempt
   loadingLocal.value = true
   try {
     const res = await window.api.readLocalKiroCredentials()
+    if (!props.open || attempt !== loginAttempt) return
     if (!res.success || !res.data) return void message.error(res.error || '读取失败')
     form.refreshToken = res.data.refreshToken
     form.clientId = res.data.clientId
@@ -418,32 +517,43 @@ async function loadFromLocalKiro(): Promise<void> {
     step.value = 'oidc'
     message.success('已读取本地 Kiro 凭证，确认后点击添加')
   } finally {
-    loadingLocal.value = false
+    if (attempt === loginAttempt) loadingLocal.value = false
   }
 }
 
 async function submitCredentials(): Promise<void> {
+  if (submitting.value) return
   if (!form.refreshToken.trim()) return void message.warning('请填写 Refresh Token')
   if (!isSocial() && (!form.clientId.trim() || !form.clientSecret.trim())) {
     return void message.warning('IdC 账号需要 Client ID 与 Client Secret')
   }
 
+  const attempt = ++loginAttempt
+  const canAdd = (): boolean =>
+    props.open && (step.value === 'oidc' || step.value === 'local') && attempt === loginAttempt
   submitting.value = true
   try {
-    const res = await accountsStore.addByCredentials({
-      refreshToken: form.refreshToken.trim(),
-      clientId: form.clientId.trim() || undefined,
-      clientSecret: form.clientSecret.trim() || undefined,
-      region: form.region.trim() || DEFAULT_REGION,
-      provider: form.provider,
-      nickname: form.nickname.trim() || undefined,
-      password: form.password.trim() || undefined
-    })
+    const res = await accountsStore.addByCredentials(
+      {
+        refreshToken: form.refreshToken.trim(),
+        clientId: form.clientId.trim() || undefined,
+        clientSecret: form.clientSecret.trim() || undefined,
+        region: form.region.trim() || DEFAULT_REGION,
+        provider: form.provider,
+        nickname: form.nickname.trim() || undefined,
+        password: form.password.trim() || undefined,
+        portalProxyUrl: portalProxyUrl.value.trim() || undefined
+      },
+      canAdd
+    )
+    if (!canAdd()) return
     if (!res.ok) return void message.error(res.error || '添加失败')
     message.success(`已添加 ${res.account?.email}`)
     close()
+  } catch {
+    if (canAdd()) message.error('凭证校验失败，请检查代理或网络设置后重试')
   } finally {
-    submitting.value = false
+    if (attempt === loginAttempt) submitting.value = false
   }
 }
 </script>
@@ -476,13 +586,29 @@ async function submitCredentials(): Promise<void> {
       <a-button type="text" size="small" class="close" @click="close">✕</a-button>
     </div>
 
+    <div class="proxy-field">
+      <label class="proxy-label" for="add-account-proxy">单个账号添加代理</label>
+      <a-input-password
+        id="add-account-proxy"
+        v-model:value="portalProxyUrl"
+        :disabled="step === 'waiting' || submitting || loadingLocal"
+        placeholder="http://user:pass@host:port 或 socks5://host:port"
+        autocomplete="off"
+        allow-clear
+      />
+      <p class="add-sub">
+        用于在线登录与添加校验，成功后保存为该账号的默认浏览器代理，不修改全局设置。
+        支持 HTTP/HTTPS 和无认证 SOCKS5。在线登录必填；凭证添加可留空，沿用现有网络设置。
+      </p>
+    </div>
+
     <!-- 方式选择 -->
     <div v-if="step === 'method'" class="option-list">
       <button
         v-for="item in methods"
         :key="item.key"
         class="option"
-        @click="item.key === 'local' ? loadFromLocalKiro() : (step = item.key)"
+        @click="pickMethod(item.key)"
       >
         <span class="option-icon"><component :is="item.icon" /></span>
         <span class="option-text">
@@ -495,7 +621,7 @@ async function submitCredentials(): Promise<void> {
         <LoadingOutlined v-if="item.key === 'local' && loadingLocal" />
       </button>
 
-      <div class="option-group-label">或批量导入已有账号</div>
+      <div class="option-group-label">或批量导入已有账号（不使用上方代理）</div>
       <button
         v-for="item in importEntries"
         :key="item.key"
@@ -512,14 +638,6 @@ async function submitCredentials(): Promise<void> {
 
     <!-- 在线登录：选择提供方 -->
     <template v-else-if="step === 'online'">
-      <div class="private-row">
-        <span>
-          <SafetyCertificateOutlined />
-          隐私 / 无痕模式
-          <span class="add-sub" style="margin: 0 0 0 6px">用无痕窗口打开，避免复用已登录身份</span>
-        </span>
-        <a-switch v-model:checked="privateMode" />
-      </div>
       <div class="option-list">
         <button
           v-for="item in providers"
@@ -537,10 +655,10 @@ async function submitCredentials(): Promise<void> {
         </button>
       </div>
       <a-alert
-        type="warning"
+        type="info"
         show-icon
         style="margin-top: 12px"
-        message="Google / GitHub 登录期间会临时接管 kiro:// 协议以接收回调，流程结束后自动归还给 Kiro IDE。"
+        message="使用隔离的代理内置无痕浏览器，不复用已登录身份；代理失败时不会回退直连或外部浏览器。"
       />
     </template>
 
@@ -558,7 +676,7 @@ async function submitCredentials(): Promise<void> {
         </a-form-item>
       </a-form>
       <a-button type="primary" block size="large" style="margin-top: 6px" @click="startEnterprise">
-        打开浏览器授权
+        打开代理浏览器授权
       </a-button>
     </template>
 
@@ -580,10 +698,10 @@ async function submitCredentials(): Promise<void> {
 
         <!-- 浏览器打开成功后才展示无痕结果 / 验证码 / 重新打开 -->
         <template v-if="!waiting.opening">
-          <div v-if="privateMode" class="private-hint">
-            <a-tag :color="waiting.openedPrivately ? 'green' : 'orange'" :bordered="false">
+          <div v-if="waiting.proxied" class="private-hint">
+            <a-tag color="green" :bordered="false">
               <SafetyCertificateOutlined />
-              {{ waiting.openedPrivately ? '无痕窗口已打开' : '未启用无痕，已回退默认浏览器' }}
+              代理内置无痕浏览器已打开
             </a-tag>
           </div>
 
@@ -596,7 +714,7 @@ async function submitCredentials(): Promise<void> {
         </template>
 
         <a-space :size="12" style="justify-content: center; width: 100%; margin-top: 22px">
-          <a-button v-if="!waiting.opening" @click="reopenBrowser">
+          <a-button v-if="!waiting.opening && !submitting" @click="reopenBrowser">
             <template #icon><ReloadOutlined /></template>
             重新打开浏览器
           </a-button>
@@ -672,7 +790,7 @@ async function submitCredentials(): Promise<void> {
       </a-form>
 
       <a-space style="width: 100%; justify-content: flex-end">
-        <a-button @click="step = 'method'">返回</a-button>
+        <a-button @click="goBack">返回</a-button>
         <a-button type="primary" :loading="submitting" @click="submitCredentials">
           <template #icon><CheckCircleFilled /></template>
           校验并添加
@@ -783,16 +901,14 @@ async function submitCredentials(): Promise<void> {
   color: var(--kal-muted);
 }
 
-.private-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 10px 14px;
-  margin-bottom: 12px;
-  border-radius: 12px;
-  background: var(--kal-code-bg);
-  font-size: 13px;
+.proxy-field {
+  margin-bottom: 18px;
+}
+
+.proxy-label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 14px;
 }
 
 .waiting {

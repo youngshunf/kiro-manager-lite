@@ -1,6 +1,21 @@
 // 网络层：统一 fetch + 可选代理
 import { Agent, ProxyAgent, fetch as undiciFetch, type Dispatcher, type RequestInit as UndiciRequestInit } from 'undici'
 import { recordOutbound } from './outboundLog'
+import { AsyncLocalStorage } from 'node:async_hooks'
+
+export interface HttpRequestOptions {
+  method?: string
+  headers?: Record<string, string>
+  body?: string | Buffer
+  timeoutMs?: number
+}
+export type HttpTransport = (url: string, options?: HttpRequestOptions) => Promise<HttpResponse>
+const requestTransport = new AsyncLocalStorage<HttpTransport>()
+
+/** 仅影响当前异步调用链，不修改全局 API 代理或其他并发账号。 */
+export function withHttpTransport<T>(transport: HttpTransport, action: () => Promise<T>): Promise<T> {
+  return requestTransport.run(transport, action)
+}
 
 /**
  * 连接保持时间，由反代参数「上游连接保持」设置，默认 60 秒。
@@ -231,13 +246,10 @@ export async function httpStream(
 /** 带超时和代理的通用请求 */
 export async function httpRequest(
   url: string,
-  options: {
-    method?: string
-    headers?: Record<string, string>
-    body?: string | Buffer
-    timeoutMs?: number
-  } = {}
+  options: HttpRequestOptions = {}
 ): Promise<HttpResponse> {
+  const transport = requestTransport.getStore()
+  if (transport) return transport(url, options)
   const { method = 'GET', headers, body, timeoutMs = 30_000 } = options
   recordOutbound(url)
   const controller = new AbortController()

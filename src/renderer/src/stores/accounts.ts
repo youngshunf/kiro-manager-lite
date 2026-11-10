@@ -649,6 +649,7 @@ export const useAccountsStore = defineStore('accounts', () => {
       idp,
       userId: snapshot.userId,
       profileArn,
+      portalProxyUrl: input.portalProxyUrl?.trim() || undefined,
       credentials: {
         accessToken: snapshot.accessToken || '',
         refreshToken: snapshot.refreshToken || input.refreshToken,
@@ -673,9 +674,12 @@ export const useAccountsStore = defineStore('accounts', () => {
 
   /** 校验凭证并添加单个账号 */
   async function addByCredentials(
-    input: BuildInput
+    input: BuildInput,
+    canAdd?: () => boolean
   ): Promise<{ ok: boolean; error?: string; account?: Account }> {
     const res = await window.api.verifyCredentials(input)
+    // 校验期间关闭或重启添加流程时，不再把迟到的结果入库。
+    if (canAdd && !canAdd()) return { ok: false, error: '添加已取消' }
     if (!res.success || !res.data) return { ok: false, error: res.error || '校验失败' }
 
     const idp = (input.provider || 'BuilderId') as IdpType
@@ -694,19 +698,25 @@ export const useAccountsStore = defineStore('accounts', () => {
   /** 在线登录成功后拉取账号信息并入库 */
   async function addByOnlineLogin(
     credentials: OnlineLoginCredentials,
-    extra?: { nickname?: string; note?: string }
+    extra?: { nickname?: string; note?: string; portalProxyUrl?: string },
+    canAdd?: () => boolean
   ): Promise<{ ok: boolean; error?: string; account?: Account }> {
-    return addByCredentials({
-      refreshToken: credentials.refreshToken,
-      clientId: credentials.clientId,
-      clientSecret: credentials.clientSecret,
-      region: credentials.region,
-      authMethod: credentials.authMethod,
-      provider: credentials.provider,
-      startUrl: credentials.startUrl,
-      profileArn: credentials.profileArn,
-      nickname: extra?.nickname
-    })
+    return addByCredentials(
+      {
+        refreshToken: credentials.refreshToken,
+        clientId: credentials.clientId,
+        clientSecret: credentials.clientSecret,
+        region: credentials.region,
+        authMethod: credentials.authMethod,
+        provider: credentials.provider,
+        startUrl: credentials.startUrl,
+        profileArn: credentials.profileArn,
+        portalProxyUrl: credentials.portalProxyUrl?.trim() || extra?.portalProxyUrl?.trim() || undefined,
+        nickname: extra?.nickname,
+        note: extra?.note
+      },
+      canAdd
+    )
   }
 
   function updateAccount(id: string, patch: Partial<Account>): void {

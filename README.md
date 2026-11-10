@@ -28,9 +28,9 @@
 本 fork 基于 [lucks-cloud/kiro-manager-lite](https://github.com/lucks-cloud/kiro-manager-lite)，保留原作者署名及 AGPL-3.0 许可证。
 
 - 仓库：[youngshunf/kiro-manager-lite](https://github.com/youngshunf/kiro-manager-lite)，工作分支：`feat/private-browser-proxy`。
-- 定制版本：`1.0.49-proxy.1`，新增每次独立私密浏览器会话、账号自动登录、全局 / 账号默认 / 本次代理与失败不直连。
+- 定制版本：`1.0.49-proxy.2`，包含每次独立私密浏览器会话、账号自动登录、全局 / 账号默认 / 本次代理与失败不直连；新增添加账号时指定代理，授权和添加校验走所选代理，成功后保存为该账号的默认浏览器代理。
 - 应用内更新只检查本 fork 的 Releases，避免安装上游包后丢失定制功能；尚未发布 fork Release 时不提供可安装更新。
-- 验证：`npm run test:portal`、`npm run build`。本机 macOS arm64 的 ad-hoc 签名打包：在项目根目录运行 `CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --mac --arm64 --dir --publish never -c.mac.identity=-`（先运行 build；不使用本机开发者证书，也不发布 Release）。
+- 验证：`npm run test:portal`、`npm run test:add-account`、`npm run build`。添加账号测试使用临时数据目录、虚构凭证和本地代理，不会读取真实账号或执行真实身份提供商授权。本机 macOS arm64 的 ad-hoc 签名打包：在项目根目录运行 `CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --mac --arm64 --dir --publish never -c.mac.identity=-`（先运行 build；不使用本机开发者证书，也不发布 Release）。
 
 ## ✨ 功能特性
 
@@ -45,6 +45,9 @@
 **添加与列表**
 
 - 五种添加方式：Google / GitHub 社交登录、AWS Builder ID 设备码、Enterprise IAM Identity Center SSO、OIDC 凭证、读取本机已登录的 Kiro 凭证
+- 「添加账号」可设置本次单个账号的代理，初始值取全局浏览器代理；添加成功后自动保存为该账号的默认浏览器代理，不修改全局设置。支持 HTTP / HTTPS（含用户名密码）和无认证 SOCKS5
+- 在线添加必须提供代理，登录页面、OIDC 注册、授权轮询、Token 交换及添加前校验均使用指定代理，不回退直连或系统浏览器；登录窗口关闭后可重新打开并保留本次授权进度，完成或取消后清理临时会话
+- 手动 / 本地凭证添加可指定代理用于校验并保存，留空则沿用既有 API 网络设置；批量导入入口不使用单账号添加代理。取消、失败或重复添加不会覆盖已有账号的代理。这里保存的是浏览器默认代理，不改变添加后常规 API 请求的全局代理设置
 - 搜索、按状态 / 订阅 / 登录方式 / 积分占比 / 总积分 / 剩余积分 / 导入时间范围（精确到时分秒）筛选、排序、多选与批量操作；上千账号用虚拟列表保持流畅
 - 自定义分组：新建 / 改名 / 删除、长按拖动排序，按分组（含「未分组」）多选筛选，可批量把选中账号移入或移出分组，卡片上直接显示分组标签
 - 卡片显示邮箱、昵称、备注、订阅档位、积分占比与 Token 剩余时间；备注可自己填，用于标记用途或来源

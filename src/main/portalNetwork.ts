@@ -1,4 +1,6 @@
-import { app } from 'electron'
+import { app, net } from 'electron'
+import { recordOutbound } from './outboundLog'
+import type { HttpRequestOptions, HttpResponse } from './net'
 
 interface PortalProxy {
   rule: string
@@ -81,4 +83,58 @@ export async function configurePortalProxy(ses: Electron.Session, input: string)
 
 export function forgetPortalProxy(ses: Electron.Session): void {
   proxies.delete(ses)
+}
+
+/** 主进程授权 / 校验请求也走同一 Chromium 会话，支持认证且绝不换回全局代理。 */
+export function portalRequest(
+  ses: Electron.Session,
+  url: string,
+  options: HttpRequestOptions = {}
+): Promise<HttpResponse> {
+  const proxy = proxies.get(ses)
+  if (!proxy) return Promise.reject(new Error('登录代理会话已关闭，请重新开始'))
+  recordOutbound(url)
+  return new Promise((resolve, reject) => {
+    const request = net.request({ url, method: options.method || 'GET', session: ses, useSessionCookies: false })
+    const timer = setTimeout(() => { request.abort(); reject(new Error('代理请求超时')) }, options.timeoutMs ?? 30_000)
+    request.on('login', (auth, callback) => {
+      if (auth.isProxy && auth.host.replace(/^\[|\]$/g, '') === proxy.host && auth.port === proxy.port) {
+        callback(proxy.username, proxy.password)
+      } else callback()
+    })
+    request.on('error', error => { clearTimeout(timer); reject(error) })
+    request.on('response', response => {
+      const chunks: Buffer[] = []
+      response.on('data', chunk => chunks.push(Buffer.from(chunk)))
+      response.on('error', error => { clearTimeout(timer); reject(error) })
+      response.on('end', () => {
+        clearTimeout(timer)
+        const body = Buffer.concat(chunks)
+        const values = response.headers
+        const get = (name: string): string | null => {
+          const value = values[name.toLowerCase()]
+          return Array.isArray(value) ? value.join(', ') : value ?? null
+        }
+        resolve({
+          ok: response.statusCode >= 200 && response.statusCode < 300,
+          status: response.statusCode,
+          url,
+          headers: {
+            get,
+            forEach: callback => Object.keys(values).forEach(name => callback(get(name) || '', name)),
+            getSetCookie: () => {
+              const value = values['set-cookie']
+              return Array.isArray(value) ? value : value ? [value] : []
+            }
+          },
+          text: async () => body.toString('utf8'),
+          json: async <T>() => JSON.parse(body.toString('utf8')) as T,
+          arrayBuffer: async () => Uint8Array.from(body).buffer
+        })
+      })
+    })
+    for (const [name, value] of Object.entries(options.headers ?? {})) request.setHeader(name, value)
+    if (options.body !== undefined) request.write(options.body)
+    request.end()
+  })
 }

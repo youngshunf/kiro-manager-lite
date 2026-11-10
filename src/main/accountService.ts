@@ -19,6 +19,8 @@ import {
 } from './kiroAuth'
 import { assertKiroCliDb, writeKiroCliAuth } from './kiroCliAuth'
 import { sleep } from './utils'
+import { withHttpTransport } from './net'
+import { createLoginBrowser } from './kiroPortal'
 import { DEFAULT_REGION } from '../shared/regions'
 import type {
   Account,
@@ -250,6 +252,16 @@ async function refreshWithRetry(
 // ============ 校验凭证（添加账号用）============
 
 export async function verifyCredentials(input: VerifyCredentialsInput): Promise<AccountSnapshot> {
+  if (!input.portalProxyUrl?.trim()) return verifyCredentialsUsingTransport(input)
+  const browser = await createLoginBrowser(input.portalProxyUrl.trim(), () => false)
+  try {
+    return await withHttpTransport(browser.request, () => verifyCredentialsUsingTransport(input))
+  } finally {
+    await browser.close()
+  }
+}
+
+async function verifyCredentialsUsingTransport(input: VerifyCredentialsInput): Promise<AccountSnapshot> {
   const { refreshToken, clientId = '', clientSecret = '', region = DEFAULT_REGION } = input
   const provider = input.provider || 'BuilderId'
   const authMethod = inferAuthMethod(provider, input.authMethod)

@@ -225,12 +225,14 @@ export interface Api {
 
   startBuilderIdLogin: (
     region?: string,
-    privateMode?: boolean
+    privateMode?: boolean,
+    options?: PortalOpenOptions
   ) => Promise<IpcResult<BuilderIdStartInfo>>
   pollBuilderIdLogin: () => Promise<IpcResult<LoginPollResult>>
   startSocialLogin: (
     provider: 'Google' | 'Github',
-    privateMode?: boolean
+    privateMode?: boolean,
+    options?: PortalOpenOptions
   ) => Promise<IpcResult<BrowserOpenInfo & { loginUrl: string }>>
   completeSocialLogin: (
     code: string,
@@ -239,9 +241,11 @@ export interface Api {
   startEnterpriseLogin: (
     startUrl: string,
     region?: string,
-    privateMode?: boolean
+    privateMode?: boolean,
+    options?: PortalOpenOptions
   ) => Promise<IpcResult<BrowserOpenInfo & { authorizeUrl: string; expiresIn: number }>>
   pollEnterpriseLogin: () => Promise<IpcResult<LoginPollResult>>
+  reopenLoginBrowser: () => Promise<IpcResult<BrowserOpenInfo>>
   cancelLogin: () => Promise<IpcResult>
   onSocialCallback: (handler: (payload: SocialCallbackPayload) => void) => () => void
 

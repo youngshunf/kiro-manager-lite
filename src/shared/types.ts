@@ -295,6 +295,8 @@ export interface AccountSnapshot {
 }
 
 export interface VerifyCredentialsInput {
+  /** 添加时的专用代理，同时保存为账号默认浏览器代理。 */
+  portalProxyUrl?: string
   refreshToken: string
   clientId?: string
   clientSecret?: string
@@ -360,6 +362,8 @@ export interface DeleteApiKeyResult {
 
 /** 在线登录拿到的原始凭证 */
 export interface OnlineLoginCredentials {
+  /** 授权开始时锁定的代理，成功后随账号保存。 */
+  portalProxyUrl?: string
   accessToken: string
   refreshToken: string
   clientId?: string
@@ -457,6 +461,8 @@ export interface BrowserOpenInfo {
   privateMode: boolean
   /** 实际使用的浏览器 */
   browser?: string
+  /** 是否在强制代理的内置私密会话中打开。 */
+  proxied?: boolean
 }
 
 export interface BuilderIdStartInfo extends BrowserOpenInfo {

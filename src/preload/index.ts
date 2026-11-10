@@ -131,15 +131,16 @@ const api = {
     subscribe('keys:chat-chunk', handler),
 
   // 在线登录
-  startBuilderIdLogin: (region?: string, privateMode?: boolean) =>
-    invoke('login:start-builder-id', region, privateMode),
+  startBuilderIdLogin: (region?: string, privateMode?: boolean, options?: PortalOpenOptions) =>
+    invoke('login:start-builder-id', region, privateMode, options),
   pollBuilderIdLogin: () => invoke('login:poll-builder-id'),
-  startSocialLogin: (provider: 'Google' | 'Github', privateMode?: boolean) =>
-    invoke('login:start-social', provider, privateMode),
+  startSocialLogin: (provider: 'Google' | 'Github', privateMode?: boolean, options?: PortalOpenOptions) =>
+    invoke('login:start-social', provider, privateMode, options),
   completeSocialLogin: (code: string, state: string) =>
     invoke('login:complete-social', code, state),
-  startEnterpriseLogin: (startUrl: string, region?: string, privateMode?: boolean) =>
-    invoke('login:start-enterprise', startUrl, region, privateMode),
+  startEnterpriseLogin: (startUrl: string, region?: string, privateMode?: boolean, options?: PortalOpenOptions) =>
+    invoke('login:start-enterprise', startUrl, region, privateMode, options),
+  reopenLoginBrowser: () => invoke('login:reopen-browser'),
   pollEnterpriseLogin: () => invoke('login:poll-enterprise'),
   cancelLogin: () => invoke('login:cancel'),
   onSocialCallback: (handler: (payload: unknown) => void) =>

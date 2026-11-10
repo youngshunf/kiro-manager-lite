@@ -26,7 +26,8 @@ import { randomUUID } from 'crypto'
 import { acceptLanguageFor } from '../shared/portalLocale'
 import { codeWhispererEndpoint } from './kiroEndpoints'
 import { getSettings } from './store'
-import { configurePortalProxy, forgetPortalProxy } from './portalNetwork'
+import { configurePortalProxy, forgetPortalProxy, portalRequest } from './portalNetwork'
+import type { HttpTransport } from './net'
 import { recordOutbound } from './outboundLog'
 import type { Account, PortalOpenOptions } from '../shared/types'
 
@@ -34,6 +35,8 @@ const PORTAL_ORIGIN = 'https://app.kiro.dev'
 
 /** 每次打开都新建不带 persist: 的内存分区；只让该窗口的子窗口共享。 */
 const portalSessions = new Set<Electron.Session>()
+const retainedSessions = new Set<Electron.Session>()
+const loginNavigations = new Map<Electron.Session, (url: string) => boolean>()
 
 /** 工具条高度：第一行按钮 + 标题，第二行地址栏 */
 const BAR_HEIGHT = 44 + 38
@@ -157,6 +160,8 @@ async function preparePortalSession(proxyUrl: string): Promise<Electron.Session>
 async function releasePortalSession(ses: Electron.Session): Promise<void> {
   if (!portalSessions.delete(ses)) return
   forgetPortalProxy(ses)
+  retainedSessions.delete(ses)
+  loginNavigations.delete(ses)
   await Promise.allSettled([ses.closeAllConnections(), ses.clearData(), ses.clearCache()])
 }
 
@@ -469,11 +474,15 @@ function pipeStateToBar(bar: WebContentsView, content: WebContentsView): void {
  */
 function keepNavigationInApp(contents: Electron.WebContents): void {
   contents.setWebRTCIPHandlingPolicy('disable_non_proxied_udp')
+  const intercept = (url: string): boolean => loginNavigations.get(contents.session)?.(url) ?? false
   contents.on('will-navigate', (event, url) => {
-    if (!/^https?:\/\//i.test(url)) event.preventDefault()
+    if (intercept(url) || !/^https?:\/\//i.test(url)) event.preventDefault()
   })
   contents.on('will-redirect', (event, url) => {
-    if (!/^https?:\/\//i.test(url)) event.preventDefault()
+    if (intercept(url) || !/^https?:\/\//i.test(url)) event.preventDefault()
+  })
+  contents.on('will-frame-navigate', event => {
+    if (intercept(event.url)) event.preventDefault()
   })
   // 内置浏览器（Stripe 账单、Kiro 官网后台等）的顶层导航也登记进出站域名统计。
   // 只记主框架完整导航，不挂 webRequest，避免给每个子资源加一跳。
@@ -481,6 +490,7 @@ function keepNavigationInApp(contents: Electron.WebContents): void {
     if (/^https?:\/\//i.test(url)) recordOutbound(url)
   })
   contents.setWindowOpenHandler(({ url }) => {
+    if (intercept(url)) return { action: 'deny' }
     if (!/^https?:\/\//i.test(url)) {
       // 不交给系统程序：外部进程不会继承本窗口的代理约束。
       return { action: 'deny' }
@@ -537,7 +547,7 @@ function trackWindow(win: BaseWindow, ses: Electron.Session): void {
     windows.delete(win)
     if (windows.size === 0) {
       sessionWindows.delete(ses)
-      void releasePortalSession(ses)
+      if (!retainedSessions.has(ses)) void releasePortalSession(ses)
     }
   })
 }
@@ -1043,6 +1053,35 @@ function createBrowserShell(title: string, ses: Electron.Session): { win: BaseWi
 
   trackWindow(win, ses)
   return { win, load }
+}
+
+/** 授权流程持有会话，关闭浏览器后仍可轮询 / 重开；完成或取消时统一释放。 */
+export async function createLoginBrowser(
+  proxyUrl: string,
+  onNavigation: (url: string) => boolean
+): Promise<{ request: HttpTransport; open: (url: string) => void; close: () => Promise<void> }> {
+  const ses = await preparePortalSession(proxyUrl)
+  retainedSessions.add(ses)
+  loginNavigations.set(ses, onNavigation)
+  let closed = false
+  return {
+    request: (url, options) => portalRequest(ses, url, options),
+    open(url) {
+      if (closed) throw new Error('登录会话已关闭，请重新开始')
+      if (!/^https?:\/\//i.test(url)) throw new Error('只支持 http(s) 链接')
+      const { win, load } = createBrowserShell('添加账号 · 代理私密登录', ses)
+      load(url)
+      win.focus()
+    },
+    async close() {
+      if (closed) return
+      closed = true
+      for (const win of [...(sessionWindows.get(ses) ?? [])]) {
+        if (!win.isDestroyed()) win.destroy()
+      }
+      await releasePortalSession(ses)
+    }
+  }
 }
 
 /** 每次新开独立私密窗口：代理先就绪，再注入账号 Cookie，最后发起导航。 */

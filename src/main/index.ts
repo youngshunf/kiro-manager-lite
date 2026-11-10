@@ -250,7 +250,7 @@ app.whenReady().then(() => {
 
   applyRuntimeSettings(getSettings())
   // 授权回调页的「返回应用」按钮靠这个回调把主窗口带到前台
-  registerLoginFocusHandler(focusWindow)
+  registerLoginFocusHandler(focusWindow, () => mainWindow)
   initProactiveRenewal(() => mainWindow)
   registerIpc(() => mainWindow)
   // 恢复上次的 API Key 接管；状态变化主动推送给渲染进程。

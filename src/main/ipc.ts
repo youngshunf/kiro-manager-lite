@@ -37,6 +37,7 @@ import {
   completeSocialLogin,
   pollBuilderIdLogin,
   pollEnterpriseLogin,
+  reopenLoginBrowser,
   startBuilderIdLogin,
   startEnterpriseLogin,
   startSocialLogin
@@ -582,14 +583,14 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   handle('keys:chat-cancel', (_e, requestId: string) => cancelChatTest(keyChatAborters, requestId))
 
   // ============ 在线登录 ============
-  handle('login:start-builder-id', async (_e, region?: string, privateMode?: boolean) =>
-    ok(await startBuilderIdLogin(region || DEFAULT_REGION, privateMode))
+  handle('login:start-builder-id', async (_e, region?: string, privateMode?: boolean, options?: PortalOpenOptions) =>
+    ok(await startBuilderIdLogin(region || DEFAULT_REGION, privateMode, options))
   )
 
   handle('login:poll-builder-id', async () => ok(await pollBuilderIdLogin()))
 
-  handle('login:start-social', async (_e, provider: 'Google' | 'Github', privateMode?: boolean) =>
-    ok(await startSocialLogin(provider, privateMode))
+  handle('login:start-social', async (_e, provider: 'Google' | 'Github', privateMode?: boolean, options?: PortalOpenOptions) =>
+    ok(await startSocialLogin(provider, privateMode, options))
   )
 
   handle('login:complete-social', async (_e, code: string, state: string) =>
@@ -598,11 +599,12 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
 
   handle(
     'login:start-enterprise',
-    async (_e, startUrl: string, region?: string, privateMode?: boolean) =>
-      ok(await startEnterpriseLogin(startUrl, region || DEFAULT_REGION, privateMode))
+    async (_e, startUrl: string, region?: string, privateMode?: boolean, options?: PortalOpenOptions) =>
+      ok(await startEnterpriseLogin(startUrl, region || DEFAULT_REGION, privateMode, options))
   )
 
   handle('login:poll-enterprise', async () => ok(await pollEnterpriseLogin()))
+  handle('login:reopen-browser', async () => ok(await reopenLoginBrowser()))
 
   handle('login:cancel', () => {
     cancelLogin()

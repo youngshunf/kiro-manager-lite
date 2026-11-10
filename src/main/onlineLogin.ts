@@ -6,14 +6,16 @@ import { setProtocolClient } from './appProtocol'
 import { openUrl } from './browser'
 import { errorMessage } from '../shared/errors'
 import { KIRO_AUTH_BASE, KIRO_OIDC_SCOPES, KIRO_START_URL, oidcEndpoint } from './kiroEndpoints'
-import { httpRequest, type HttpResponse } from './net'
+import { httpRequest, type HttpResponse, type HttpTransport } from './net'
+import { createLoginBrowser } from './kiroPortal'
 import { DEFAULT_REGION } from '../shared/regions'
 import type {
   BrowserOpenInfo,
   BuilderIdStartInfo,
   IdpType,
   LoginPollResult,
-  OnlineLoginCredentials
+  OnlineLoginCredentials,
+  PortalOpenOptions
 } from '../shared/types'
 
 const SOCIAL_REDIRECT_URI = 'kiro://kiro.kiroAgent/authenticate-success'
@@ -62,8 +64,8 @@ export function unregisterProtocol(): void {
 }
 
 /** OIDC / auth service 的接口一律是 JSON POST，统一在这里拼请求 */
-function postJson(url: string, body: Record<string, unknown>): Promise<HttpResponse> {
-  return httpRequest(url, {
+function postJson(url: string, body: Record<string, unknown>, transport: HttpTransport = httpRequest): Promise<HttpResponse> {
+  return transport(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
@@ -92,6 +94,83 @@ export function handleProtocolUrl(url: string, window: BrowserWindow | null): vo
 
 // ============ 登录会话状态 ============
 
+interface LoginNetwork {
+  proxyUrl?: string
+  browser?: Awaited<ReturnType<typeof createLoginBrowser>>
+  transport: HttpTransport
+  loginUrl?: string
+  privateMode?: boolean
+  callbackReceived?: boolean
+  active: boolean
+}
+
+let loginNetwork: LoginNetwork | null = null
+
+async function prepareLogin(options?: PortalOpenOptions): Promise<LoginNetwork> {
+  cancelLogin()
+  const current: LoginNetwork = { transport: httpRequest, active: true }
+  loginNetwork = current
+  if (options?.proxyUrl !== undefined) {
+    current.proxyUrl = options.proxyUrl.trim()
+    try {
+      current.browser = await createLoginBrowser(current.proxyUrl, url => interceptLoginCallback(current, url))
+      current.transport = current.browser.request
+      if (!current.active) {
+        await current.browser.close()
+        throw new Error('登录已取消')
+      }
+    } catch (error) {
+      if (loginNetwork === current) cancelLogin()
+      throw error
+    }
+  }
+  return current
+}
+
+async function openLogin(current: LoginNetwork, url: string, privateMode?: boolean): Promise<BrowserOpenInfo> {
+  if (!current.active) throw new Error('登录已取消')
+  current.loginUrl = url
+  current.privateMode = privateMode
+  if (current.browser) {
+    current.browser.open(url)
+    return { privateMode: true, browser: '内置 Chromium', proxied: true }
+  }
+  return openUrl(url, privateMode)
+}
+
+export async function reopenLoginBrowser(): Promise<BrowserOpenInfo> {
+  const current = loginNetwork
+  if (!current?.loginUrl || !current.active) throw new Error('没有可重新打开的登录流程')
+  if (expired()) { cancelLogin(); throw new Error('授权已超时，请重新开始') }
+  return openLogin(current, current.loginUrl, current.privateMode)
+}
+
+function interceptLoginCallback(current: LoginNetwork, url: string): boolean {
+  if (!current.active) return true
+  let parsed: URL
+  try { parsed = new URL(url) } catch { return false }
+  const expected = new URL(SOCIAL_REDIRECT_URI)
+  if (session?.kind === 'social' && parsed.protocol === expected.protocol && parsed.host === expected.host && parsed.pathname === expected.pathname) {
+    const state = parsed.searchParams.get('state')
+    if (state !== session.state || current.callbackReceived) return true
+    current.callbackReceived = true
+    const payload = {
+      code: parsed.searchParams.get('code') || undefined,
+      state,
+      error: parsed.searchParams.get('error') || undefined
+    }
+    const window = getLoginWindow?.()
+    if (window && !window.isDestroyed()) window.webContents.send('login:social-callback', payload)
+    focusApp?.()
+    return true
+  }
+  if (session?.kind === 'enterprise' && session.callback && parsed.origin + parsed.pathname === session.redirectUri) {
+    void session.callback(parsed)
+    return true
+  }
+  return false
+}
+
 interface BuilderIdSession {
   kind: 'builderId'
   clientId: string
@@ -117,6 +196,8 @@ interface EnterpriseSession {
   kind: 'enterprise'
   expiresAt: number
   server: http.Server
+  redirectUri?: string
+  callback?: (url: URL) => Promise<void>
   result?: { success: boolean; credentials?: OnlineLoginCredentials; error?: string }
 }
 
@@ -131,9 +212,11 @@ let session: Session | null = null
 
 /** 主窗口唤起回调，由主进程在启动时登记 */
 let focusApp: (() => void) | null = null
+let getLoginWindow: (() => BrowserWindow | null) | null = null
 
-export function registerLoginFocusHandler(fn: () => void): void {
+export function registerLoginFocusHandler(fn: () => void, getWindow: () => BrowserWindow | null): void {
   focusApp = fn
+  getLoginWindow = getWindow
 }
 
 /** 登录结束后回调服务器的额外存活时间 */
@@ -161,6 +244,11 @@ export function shutdownLoginServers(): void {
 }
 
 export function cancelLogin(): void {
+  if (loginNetwork) {
+    loginNetwork.active = false
+    void loginNetwork.browser?.close()
+    loginNetwork = null
+  }
   if (session?.kind === 'enterprise') lingerServer(session.server)
   if (session?.kind === 'social') unregisterProtocol()
   session = null
@@ -176,7 +264,8 @@ async function registerOidcClient(
   region: string,
   grantTypes: string[],
   issuerUrl: string,
-  redirectUris?: string[]
+  redirectUris?: string[],
+  transport: HttpTransport = httpRequest
 ): Promise<{ clientId: string; clientSecret: string }> {
   const res = await postJson(`${oidcEndpoint(region)}/client/register`, {
     clientName: 'Kiro Manager Lite',
@@ -185,7 +274,7 @@ async function registerOidcClient(
     grantTypes,
     ...(redirectUris ? { redirectUris } : {}),
     issuerUrl
-  })
+  }, transport)
   if (!res.ok) {
     const text = await res.text()
     if (text.includes('UnauthorizedException') || text.includes('access denied')) {
@@ -214,20 +303,23 @@ async function registerOidcClient(
 
 export async function startBuilderIdLogin(
   region = DEFAULT_REGION,
-  privateMode?: boolean
+  privateMode?: boolean,
+  options?: PortalOpenOptions
 ): Promise<BuilderIdStartInfo> {
-  cancelLogin()
+  const network = await prepareLogin(options)
   const { clientId, clientSecret } = await registerOidcClient(
     region,
     ['urn:ietf:params:oauth:grant-type:device_code', 'refresh_token'],
-    KIRO_START_URL
+    KIRO_START_URL,
+    undefined,
+    network.transport
   )
 
   const res = await postJson(`${oidcEndpoint(region)}/device_authorization`, {
     clientId,
     clientSecret,
     startUrl: KIRO_START_URL
-  })
+  }, network.transport)
   if (!res.ok) throw new Error(`设备授权失败：${(await res.text()).slice(0, 200)}`)
 
   const data = await res.json<{
@@ -242,6 +334,7 @@ export async function startBuilderIdLogin(
   const interval = data.interval ?? 5
   const expiresIn = data.expiresIn ?? 600
 
+  if (!network.active) throw new Error('登录已取消')
   session = {
     kind: 'builderId',
     clientId,
@@ -252,7 +345,7 @@ export async function startBuilderIdLogin(
   }
 
   const verificationUri = data.verificationUriComplete || data.verificationUri
-  const opened = await openUrl(verificationUri, privateMode)
+  const opened = await openLogin(network, verificationUri, privateMode)
 
   return {
     userCode: data.userCode,
@@ -260,7 +353,8 @@ export async function startBuilderIdLogin(
     interval,
     expiresIn,
     privateMode: opened.privateMode,
-    browser: opened.browser
+    browser: opened.browser,
+    proxied: opened.proxied
   }
 }
 
@@ -271,13 +365,15 @@ export async function pollBuilderIdLogin(): Promise<LoginPollResult> {
     throw new Error('授权已超时，请重新开始')
   }
 
+  const network = loginNetwork!
   const { clientId, clientSecret, deviceCode, region } = session
   const res = await postJson(`${oidcEndpoint(region)}/token`, {
     clientId,
     clientSecret,
     grantType: 'urn:ietf:params:oauth:grant-type:device_code',
     deviceCode
-  })
+  }, network.transport)
+  if (!network.active) throw new Error('登录已取消')
 
   if (res.status === 200) {
     const data = await res.json<{ accessToken: string; refreshToken: string; expiresIn?: number }>()
@@ -292,7 +388,8 @@ export async function pollBuilderIdLogin(): Promise<LoginPollResult> {
         region,
         expiresIn: data.expiresIn ?? DEFAULT_EXPIRES_IN,
         authMethod: 'IdC',
-        provider: 'BuilderId'
+        provider: 'BuilderId',
+        portalProxyUrl: network.proxyUrl
       }
     }
   }
@@ -315,9 +412,10 @@ export async function pollBuilderIdLogin(): Promise<LoginPollResult> {
 
 export async function startSocialLogin(
   provider: 'Google' | 'Github',
-  privateMode?: boolean
+  privateMode?: boolean,
+  options?: PortalOpenOptions
 ): Promise<BrowserOpenInfo & { loginUrl: string }> {
-  cancelLogin()
+  const network = await prepareLogin(options)
 
   const codeVerifier = crypto.randomBytes(64).toString('base64url').slice(0, 128)
   const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url')
@@ -343,7 +441,7 @@ export async function startSocialLogin(
    * 本应用永远等不到 code，用户只会看到「浏览器授权完了，然后打开了别的应用」。
    * 这里先强制把默认处理者抢回本应用；仍抢不到（通常是开发模式未声明该协议）就提前拦下并说明原因。
    */
-  if (!registerProtocol()) {
+  if (!network.browser && !registerProtocol()) {
     cancelLogin()
     throw new Error(
       '无法接管 kiro:// 回调协议，社交登录的回调会被其它应用接走。' +
@@ -352,8 +450,8 @@ export async function startSocialLogin(
     )
   }
   const url = loginUrl.toString()
-  const opened = await openUrl(url, privateMode)
-  return { loginUrl: url, privateMode: opened.privateMode, browser: opened.browser }
+  const opened = await openLogin(network, url, privateMode)
+  return { loginUrl: url, ...opened }
 }
 
 export async function completeSocialLogin(
@@ -366,12 +464,15 @@ export async function completeSocialLogin(
     throw new Error('state 参数不匹配，已中止登录')
   }
 
+  if (expired()) { cancelLogin(); throw new Error('授权已超时，请重新开始') }
+  const network = loginNetwork!
   const { codeVerifier, provider } = session
   const res = await postJson(`${KIRO_AUTH_BASE}/oauth/token`, {
     code,
     code_verifier: codeVerifier,
     redirect_uri: SOCIAL_REDIRECT_URI
-  })
+  }, network.transport)
+  if (!network.active) throw new Error('登录已取消')
 
   if (!res.ok) {
     const text = await res.text()
@@ -394,7 +495,8 @@ export async function completeSocialLogin(
     region: DEFAULT_REGION,
     expiresIn: data.expiresIn ?? DEFAULT_EXPIRES_IN,
     authMethod: 'social',
-    provider: provider as IdpType
+    provider: provider as IdpType,
+    portalProxyUrl: network.proxyUrl
   }
 }
 
@@ -487,10 +589,11 @@ function callbackPage(title: string, detail: string, ok = true): string {
 export async function startEnterpriseLogin(
   startUrl: string,
   region = DEFAULT_REGION,
-  privateMode?: boolean
+  privateMode?: boolean,
+  options?: PortalOpenOptions
 ): Promise<BrowserOpenInfo & { authorizeUrl: string; expiresIn: number }> {
   if (!/^https:\/\//i.test(startUrl)) throw new Error('SSO Start URL 必须以 https:// 开头')
-  cancelLogin()
+  const network = await prepareLogin(options)
 
   const port = await pickPort()
   const redirectUri = `http://127.0.0.1:${port}/oauth/callback`
@@ -499,98 +602,62 @@ export async function startEnterpriseLogin(
     region,
     ['authorization_code', 'refresh_token'],
     startUrl,
-    [redirectUri]
+    [redirectUri],
+    network.transport
   )
 
   const codeVerifier = crypto.randomBytes(32).toString('base64url')
   const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url')
   const state = crypto.randomUUID()
 
-  const server = http.createServer(async (req, res) => {
-    const url = new URL(req.url || '', `http://127.0.0.1:${port}`)
-
-    // 回调页「返回应用」按钮：唤起主窗口。放在会话检查之前，
-    // 这样登录流程结束后按钮依然可用。
-    if (url.pathname === '/focus') {
-      focusApp?.()
-      res.writeHead(204)
-      return res.end()
-    }
-
+  let exchanging = false
+  const callback = async (url: URL): Promise<void> => {
     const current = session
-    if (current?.kind !== 'enterprise') {
-      res.writeHead(410)
-      return res.end('Gone')
-    }
-
-    if (url.pathname !== '/oauth/callback') {
-      res.writeHead(404)
-      return res.end('Not Found')
-    }
-
-    const finish = (title: string, detail: string, ok = true): void => {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
-      res.end(callbackPage(title, detail, ok))
-    }
-
-    const error = url.searchParams.get('error')
-    if (error) {
-      current.result = { success: false, error: `授权失败：${error}` }
-      return finish('授权失败', '可以关闭此页面，回到应用查看详情。', false)
-    }
+    if (!network.active || current?.kind !== 'enterprise' || current.server !== server || exchanging) return
     if (url.searchParams.get('state') !== state) {
       current.result = { success: false, error: 'state 参数不匹配，已中止登录' }
-      return finish('授权失败', 'state 校验未通过，请回到应用重试。', false)
+      return
     }
+    const error = url.searchParams.get('error')
     const code = url.searchParams.get('code')
-    if (!code) {
-      current.result = { success: false, error: '回调中没有授权码' }
-      return finish('授权失败', '未收到授权码，请回到应用重试。', false)
+    if (error || !code) {
+      current.result = { success: false, error: error ? `授权失败：${error}` : '回调中没有授权码' }
+      return
     }
-
-    finish('授权成功', '正在获取令牌，可以关闭此页面并返回 Kiro Manager Lite。')
-
+    exchanging = true
     try {
       const tokenRes = await postJson(`${oidcEndpoint(region)}/token`, {
-        clientId,
-        clientSecret,
-        grantType: 'authorization_code',
-        redirectUri,
-        code,
-        codeVerifier
-      })
-      if (!tokenRes.ok) {
-        current.result = {
-          success: false,
-          error: `获取 Token 失败：${(await tokenRes.text()).slice(0, 200)}`
-        }
-        return
-      }
-      const data = await tokenRes.json<{
-        accessToken: string
-        refreshToken: string
-        expiresIn?: number
-      }>()
+        clientId, clientSecret, grantType: 'authorization_code', redirectUri, code, codeVerifier
+      }, network.transport)
+      if (!network.active) return
+      if (!tokenRes.ok) throw new Error(`获取 Token 失败：${(await tokenRes.text()).slice(0, 200)}`)
+      const data = await tokenRes.json<{ accessToken: string; refreshToken: string; expiresIn?: number }>()
       current.result = {
         success: true,
         credentials: {
-          accessToken: data.accessToken,
-          refreshToken: data.refreshToken,
-          clientId,
-          clientSecret,
-          region,
-          startUrl,
+          accessToken: data.accessToken, refreshToken: data.refreshToken,
+          clientId, clientSecret, region, startUrl,
           expiresIn: data.expiresIn ?? DEFAULT_EXPIRES_IN,
-          authMethod: 'IdC',
-          provider: 'Enterprise'
+          authMethod: 'IdC', provider: 'Enterprise', portalProxyUrl: network.proxyUrl
         }
       }
     } catch (e) {
-      current.result = {
-        success: false,
-        error: errorMessage(e, '获取 Token 失败')
-      }
+      current.result = { success: false, error: errorMessage(e, '获取 Token 失败') }
     }
+    focusApp?.()
+  }
+  // 内置代理会话在导航前截获精确回调 URI，不向远端代理发送 loopback 回调。
+  // 本地服务器仅用于保留旧的外部浏览器登录入口。
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url || '', `http://127.0.0.1:${port}`)
+    if (url.pathname === '/focus') { focusApp?.(); res.writeHead(204); res.end(); return }
+    if (!network.active || session?.kind !== 'enterprise' || session.server !== server) {
+      res.writeHead(410); res.end('Gone'); return
+    }
+    if (url.pathname !== '/oauth/callback') { res.writeHead(404); res.end('Not Found'); return }
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+    res.end(callbackPage('授权回调已收到', '请返回 Kiro Manager Lite 查看登录结果。'))
+    void callback(url)
   })
 
   await new Promise<void>((resolve, reject) => {
@@ -598,10 +665,13 @@ export async function startEnterpriseLogin(
     server.listen(port, '127.0.0.1', resolve)
   })
 
+  if (!network.active) { server.close(); throw new Error('登录已取消') }
   session = {
     kind: 'enterprise',
     expiresAt: Date.now() + LOGIN_TTL_MS,
-    server
+    server,
+    redirectUri,
+    callback
   }
 
   const params = new URLSearchParams({
@@ -614,13 +684,14 @@ export async function startEnterpriseLogin(
     code_challenge_method: 'S256'
   })
   const authorizeUrl = `${oidcEndpoint(region)}/authorize?${params.toString()}`
-  const opened = await openUrl(authorizeUrl, privateMode)
+  const opened = await openLogin(network, authorizeUrl, privateMode)
 
   return {
     authorizeUrl,
     expiresIn: LOGIN_TTL_MS / 1000,
     privateMode: opened.privateMode,
-    browser: opened.browser
+    browser: opened.browser,
+    proxied: opened.proxied
   }
 }
 

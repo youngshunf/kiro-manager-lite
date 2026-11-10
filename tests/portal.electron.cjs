@@ -151,7 +151,12 @@ async function main() {
       await assert.rejects(() => portal.openInAppUrl(target, 'Invalid', { proxyUrl: invalid }), /代理/)
     }
     assert.equal(contentPages().length, count, 'invalid proxy must not create a window')
+    const failedLogin = await portal.createLoginBrowser(a.url(), () => false)
     await a.stop()
+    try {
+      await assert.rejects(() => failedLogin.request(`${target}/login-must-not-arrive`))
+      assert.equal(arrivals.filter(row => row.path === '/login-must-not-arrive').length, 0)
+    } finally { await failedLogin.close() }
     const failed = await popup.executeJavaScript(`fetch('${target}/must-not-arrive').then(() => false, () => true)`)
     assert.equal(failed, true)
     assert.equal(arrivals.filter(row => row.path === '/must-not-arrive' || row.proxy === 'DIRECT').length, 0, 'proxy down must not fall back to direct')
@@ -167,6 +172,13 @@ async function main() {
       await until(() => authPage.getTitle() === 'Local portal fixture', 'authenticated page loaded')
       assert.equal(await authPage.executeJavaScript(`fetch('/resource').then(r => r.text())`), 'resource-ok')
       console.log('PASS HTTP proxy authentication scoped to its own window')
+      const login = await portal.createLoginBrowser(proxyUrl, () => false)
+      try {
+        const response = await login.request(`${target}/resource`)
+        assert.equal(response.status, 200)
+        assert.equal(await response.text(), 'resource-ok')
+        console.log('PASS main-process login transport uses authenticated session proxy')
+      } finally { await login.close() }
     } finally { await authenticated.stop() }
 
     const sessions = new Set(contentPages().map(wc => wc.session))

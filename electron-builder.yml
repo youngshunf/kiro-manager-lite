@@ -39,6 +39,8 @@ files:
   # 构建期脚本（清理产物、生成图标与 DMG 背景），运行时用不到
   - '!scripts'
   - '!tests'
+  # 使用临时输出目录打包时，默认忽略的不再是 dist；显式排除旧安装包，防止嵌套打包。
+  - '!dist'
   - '!*.md'
 asarUnpack:
   - resources/**

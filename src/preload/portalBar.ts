@@ -19,7 +19,7 @@ export interface PortalBarState {
 }
 
 /** 工具条能触发的动作，主进程按名字分发 */
-export type PortalBarAction = 'back' | 'forward' | 'reload' | 'stop' | 'menu' | 'navigate'
+export type PortalBarAction = 'back' | 'forward' | 'reload' | 'stop' | 'menu' | 'navigate' | 'new-window' | 'outlook-signup'
 
 contextBridge.exposeInMainWorld('portalBar', {
   /** payload 目前只有 navigate 用到，传地址栏里输入的内容 */

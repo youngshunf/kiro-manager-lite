@@ -612,6 +612,13 @@ function bindBarActions(): void {
       case 'menu':
         popupBarMenu(entry.win, wc)
         break
+      case 'new-window':
+        // 复用发起窗口的 Session，不能用会新建分区的 openInAppUrl。
+        createBrowserShell('同环境新窗口', wc.session).load('about:blank')
+        break
+      case 'outlook-signup':
+        createBrowserShell('Outlook 邮箱注册 · 同环境', wc.session).load('https://signup.live.com/signup')
+        break
       case 'navigate': {
         const target = toNavigableUrl(payload || '')
         if (!target) break
@@ -813,6 +820,11 @@ function barHtml(padLeft: number): string {
     text-align: center; color: #3c4043;
   }
   #title.loading { color: #8b8f94; }
+  .text-button { display: flex; align-items: center; justify-content: center; gap: 4px; width: auto; padding: 0 8px; font: inherit; white-space: nowrap; }
+  @media (max-width: 600px) {
+    .new-window-label { display: none; }
+    .text-button { padding: 0 6px; font-size: 12px; }
+  }
   /* 加载进度条：站点慢的时候至少让用户看到「在动」，而不是干等一片空白 */
   #progress {
     position: fixed; left: 0; bottom: 0; height: 2px; width: 100%;
@@ -840,6 +852,8 @@ function barHtml(padLeft: number): string {
 
     <div id="title"></div>
 
+    <button id="new-window" class="text-button" aria-label="同环境新窗口" title="新开空白窗口，共用当前私密会话和代理，不替换本页"><span aria-hidden="true">＋</span><span class="new-window-label">同环境新窗口</span></button>
+    <button id="outlook-signup" class="text-button" title="在同一私密会话和代理下新开微软官方邮箱注册页，手动完成注册">Outlook 注册</button>
     <button id="dots" title="更多">
       <svg viewBox="0 0 24 24" style="fill: currentColor; stroke: none">
         <circle cx="5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="19" cy="12" r="1.7" />
@@ -866,6 +880,8 @@ function barHtml(padLeft: number): string {
   $('forward').onclick = function () { window.portalBar.action('forward') }
   $('reload').onclick = function () { window.portalBar.action(loading ? 'stop' : 'reload') }
   $('dots').onclick = function () { window.portalBar.action('menu') }
+  $('new-window').onclick = function () { window.portalBar.action('new-window') }
+  $('outlook-signup').onclick = function () { window.portalBar.action('outlook-signup') }
 
   var go = function () {
     var value = urlEl.value.trim()
@@ -890,7 +906,7 @@ function barHtml(padLeft: number): string {
   window.portalBar.onState(function (s) {
     loading = s.loading
     // note 是重试进度这类临时提示，比标题更该让用户看到
-    titleEl.textContent = s.note || (s.loading ? '加载中…' : (s.title || s.url || ''))
+    titleEl.textContent = s.note || (s.loading ? '加载中…' : (s.url === 'about:blank' ? '同环境新窗口' : (s.title || s.url || '')))
     titleEl.className = s.loading ? 'loading' : ''
     titleEl.title = s.url || ''
     $('back').disabled = !s.canGoBack
@@ -902,7 +918,7 @@ function barHtml(padLeft: number): string {
      * 地址栏跟随当前页面，但正在输入时不覆盖——否则用户打一半就被跳转事件冲掉。
      * data: URL 是我们自己的错误页，不该显示给用户。
      */
-    var shown = s.url && s.url.indexOf('data:') !== 0 ? s.url : ''
+    var shown = s.url && s.url !== 'about:blank' && s.url.indexOf('data:') !== 0 ? s.url : ''
     urlEl.dataset.current = shown
     if (!editing) urlEl.value = shown
   })

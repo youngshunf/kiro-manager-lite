@@ -25,6 +25,22 @@ async function opened(action) {
   await action()
   return until(() => contentPages().find(wc => !before.has(wc.id)), 'new browser content')
 }
+function toolbarFor(page) {
+  const win = BaseWindow.getAllWindows().find(win => win.contentView.children.some(view => view.webContents === page))
+  assert(win, 'page has a browser window')
+  return win.contentView.children.find(view => view.webContents && view.webContents !== page).webContents
+}
+async function clickToolbar(page, id) {
+  const bar = toolbarFor(page)
+  await until(() => bar.executeJavaScript(`!!window.portalBar && document.readyState === 'complete'`), 'toolbar ready')
+  assert.equal(await bar.executeJavaScript(`(() => { const button=document.getElementById(${JSON.stringify(id)}); if(!button)return false; button.click(); return true })()`), true, `toolbar button ${id} exists`)
+}
+async function navigateWithToolbar(page, url) {
+  const bar = toolbarFor(page)
+  await bar.executeJavaScript(`document.getElementById('url').value=${JSON.stringify(url)}`)
+  await clickToolbar(page, 'go')
+  await until(() => page.getURL() === url && !page.isLoading(), 'address-bar navigation')
+}
 function proxyServer(label, tunnels, password) {
   const hits = []
   const sockets = new Set()
@@ -106,6 +122,29 @@ async function main() {
     assert.equal(await first.session.resolveProxy(target), `PROXY 127.0.0.1:${a.server.address().port}`)
     await until(() => arrivals.some(row => row.proxy === 'A') && arrivals.some(row => row.proxy === 'B'), 'both proxies used')
     await until(() => first.getTitle() === 'Local portal fixture', 'first page loaded')
+    // Real toolbar -> preload -> IPC: no new partition and no lost form state.
+    await first.executeJavaScript(`document.body.insertAdjacentHTML('beforeend','<input id="draft" value="unfinished">'); document.cookie='ToolbarProgress=fixture; path=/'; localStorage.setItem('draft','in-progress')`)
+    portal.setSettings({ portalProxyUrl: b.url() })
+    const companion = await opened(() => clickToolbar(first, 'new-window'))
+    assert.equal(companion.session, first.session, 'same-environment window inherits the existing session, not the new global proxy')
+    assert.equal(await companion.session.resolveProxy(target), `PROXY 127.0.0.1:${a.server.address().port}`)
+    await navigateWithToolbar(companion, `${target}/companion`)
+    assert.match(await companion.executeJavaScript('document.cookie'), /ToolbarProgress=fixture/)
+    assert.equal(await companion.executeJavaScript(`localStorage.getItem('draft')`), 'in-progress')
+    await until(() => second.getTitle() === 'Local portal fixture', 'independent page loaded')
+    assert.doesNotMatch(await second.executeJavaScript('document.cookie'), /ToolbarProgress/)
+    assert.equal(await second.executeJavaScript(`localStorage.getItem('draft')`), null)
+    assert.equal(first.getURL(), `${target}/`)
+    assert.equal(await first.executeJavaScript(`document.getElementById('draft').value`), 'unfinished')
+    assert(arrivals.some(row => row.path === '/companion' && row.proxy === 'A'), 'companion navigation used the initiating proxy')
+    console.log('PASS toolbar new window preserves form, session, proxy and same-origin storage; independent environments remain isolated')
+    const outlook = await opened(() => clickToolbar(first, 'outlook-signup'))
+    await until(() => outlook.getURL() === 'https://signup.live.com/signup' && !outlook.isLoading(), 'official Outlook signup destination (local HTTPS fixture)')
+    assert.equal(outlook.session, first.session)
+    assert.equal(await outlook.session.resolveProxy(outlook.getURL()), `PROXY 127.0.0.1:${a.server.address().port}`)
+    assert.equal(first.getURL(), `${target}/`)
+    assert.equal(await first.executeJavaScript(`document.getElementById('draft').value`), 'unfinished')
+    console.log('PASS Outlook signup toolbar opens official URL in the same environment without replacing the original page')
     assert.equal(await first.executeJavaScript(`fetch('/resource').then(r => r.text())`), 'resource-ok')
     await until(() => arrivals.some(row => row.path === '/image') && arrivals.some(row => row.path === '/frame'), 'subresources')
     const popup = await opened(() => first.executeJavaScript(`window.open('${target}/popup'); undefined`, true))
@@ -123,6 +162,7 @@ async function main() {
     assert.equal((await popup.session.cookies.get({name:'SharedPopup'}))[0]?.value, 'still-alive', 'closing parent must preserve live child session')
     await until(() => popup.getTitle() === 'Local portal fixture', 'child remains loaded')
     assert.equal(await popup.executeJavaScript(`fetch('/resource').then(r => r.text())`), 'resource-ok')
+    assert.equal(await companion.executeJavaScript(`fetch('/resource').then(r => r.text())`), 'resource-ok', 'toolbar child remains usable after parent close')
     console.log('PASS distinct proxies, pages, subresources, fetch, popups and WebSocket')
 
     const account = suffix => ({ id: suffix, email: `${suffix}@example.invalid`, idp: 'BuilderId', credentials: { accessToken: `access-${suffix}`, refreshToken: `refresh-${suffix}` } })

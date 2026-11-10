@@ -6,15 +6,20 @@ import { join } from 'node:path'
 
 const require = createRequire(import.meta.url)
 const root = fileURLToPath(new URL('../', import.meta.url))
-const output = join(root, 'node_modules/.cache/portal-test.cjs')
-await build({
-  entryPoints: [join(root, 'tests/portal.entry.ts')],
+const testBuild = join(root, 'node_modules/.cache/portal-test')
+const output = join(testBuild, 'main/index.cjs')
+// Match the app's main/../preload layout so toolbar clicks exercise its real bridge.
+await Promise.all([
+  ['tests/portal.entry.ts', output],
+  ['src/preload/portalBar.ts', join(testBuild, 'preload/portalBar.js')]
+].map(([entry, outfile]) => build({
+  entryPoints: [join(root, entry)],
   bundle: true,
   platform: 'node',
   format: 'cjs',
   external: ['electron'],
-  outfile: output
-})
+  outfile
+})))
 const env = { ...process.env }
 delete env.ELECTRON_RUN_AS_NODE
 const result = spawnSync(require('electron'), [join(root, 'tests/portal.electron.cjs'), output], {

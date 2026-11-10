@@ -43,6 +43,38 @@ async function input(selector, value) {
 }
 async function accounts() { return (await evaluate('window.api.loadAccounts()')).data.accounts }
 function privatePages() { return webContents.getAllWebContents().filter(wc=>wc.session!==session.defaultSession) }
+function browserParts(page) {
+  const win=BaseWindow.getAllWindows().find(win=>win.contentView.children.some(view=>view.webContents===page))
+  assert(win,'private page has a browser window')
+  const bar=win.contentView.children.find(view=>view.webContents && view.webContents!==page).webContents
+  return {win,bar}
+}
+async function clickBrowserButton(page,id) {
+  const {bar}=browserParts(page)
+  await until(()=>bar.executeJavaScript(`!!window.portalBar && document.readyState==='complete'`),'browser toolbar')
+  assert.equal(await bar.executeJavaScript(`(() => {const el=document.getElementById(${JSON.stringify(id)});if(!el)return false;el.click();return true})()`),true,`browser button ${id}`)
+}
+async function captureBrowser(page) {
+  const {win,bar}=browserParts(page)
+  const directory=process.env.KIRO_BROWSER_SCREENSHOT_DIR
+  const original=win.getSize()
+  win.show()
+  win.focus()
+  try {
+    for(const [label,width] of [['normal',1000],['narrow',480]]) {
+      win.setSize(width,720)
+      await Promise.race([
+        bar.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))'),
+        delay(2000).then(()=>{throw Error('Toolbar animation frames paused during resize')})
+      ])
+      assert.equal(await bar.executeJavaScript(`['new-window','outlook-signup','dots','go'].every(id=>{const r=document.getElementById(id).getBoundingClientRect();return r.width>0 && r.left>=0 && r.right<=innerWidth && r.bottom<=innerHeight})`),true,`toolbar controls visible at ${width}px`)
+      if(directory) {
+        await delay(200)
+        writeFileSync(join(directory,`same-environment-toolbar-${label}.png`),(await bar.capturePage()).toPNG())
+      }
+    }
+  } finally { win.setSize(...original) }
+}
 async function capture(label) {
   const path = process.env.KIRO_TEST_SCREENSHOT
   if (!path) return
@@ -119,6 +151,21 @@ async function run() {
   assert.equal(await page.session.resolveProxy('https://fixture.invalid'),`PROXY 127.0.0.1:${proxy.address().port}`)
   assert.equal(await evaluate(`document.querySelector('#add-account-proxy').disabled`),true)
   const loginUrl = new URL(page.getURL())
+  await page.executeJavaScript(`document.body.insertAdjacentHTML('beforeend','<label>本地测试草稿 <input id="draft" value="unfinished"></label>')`)
+  await clickBrowserButton(page,'new-window')
+  await until(()=>privatePages().length===2,'same-environment blank window')
+  const blank=privatePages().find(wc=>wc!==page)
+  await until(()=>blank.getURL()==='about:blank','blank window ready')
+  assert.equal(blank.session,loginSession)
+  await clickBrowserButton(page,'outlook-signup')
+  await until(()=>privatePages().length===3 && privatePages().some(wc=>wc.getURL()==='https://signup.live.com/signup'),'same-environment Outlook signup')
+  const outlook=privatePages().find(wc=>wc.getURL()==='https://signup.live.com/signup')
+  assert.equal(outlook.session,loginSession)
+  assert.equal(await outlook.session.resolveProxy(outlook.getURL()),`PROXY 127.0.0.1:${proxy.address().port}`)
+  assert.equal(page.getURL(),loginUrl.toString(),'opening companions must leave authorization page intact')
+  assert.equal(await page.executeJavaScript(`document.getElementById('draft').value`),'unfinished')
+  await captureBrowser(page)
+  console.log('PASS actual login toolbar opens same-session blank/Outlook companions; original form and proxy unchanged')
   // Protocol fixture instead of real network; callback must be intercepted within app.
   await page.executeJavaScript(`location.href='kiro://kiro.kiroAgent/authenticate-success?code=fixture-code&state=${loginUrl.searchParams.get('state')}'`)
   await until(async()=>(await accounts()).length===1,'online saved account')
@@ -129,6 +176,7 @@ async function run() {
   assert(requests.some(row=>row.path?.includes('/refreshToken')),'verification used local proxy')
   assert.equal(requests.filter(row=>row.path?.includes('/oauth/token')).length,1,'callback exchanged exactly once')
   await until(async()=>(await loginSession.cookies.get({})).length===0,'login cookie cleanup')
+  await until(()=>[page,blank,outlook].every(wc=>wc.isDestroyed()),'successful login closes every companion')
   console.log('PASS actual Add Account UI -> proxied social callback -> token/verification -> stored account proxy')
   console.log('PASS reopen retains proxy session; completed login closes it and clears cookies')
 
@@ -218,6 +266,23 @@ async function run() {
   assert.equal((await accounts()).length,4)
   assert(!(await accounts()).some(account=>account.email===email))
   console.log('PASS cancelled in-flight validation cannot save a late result')
+
+  // Cancelling an online add must also destroy its mailbox companion and private data.
+  await click('添加账号'); await click('在线登录'); await click('Google 账号')
+  await until(()=>privatePages().some(wc=>wc.getURL().includes('/login?')),'cancellable login page')
+  const cancelledPage=privatePages().find(wc=>wc.getURL().includes('/login?'))
+  const cancelledSession=cancelledPage.session
+  assert.notEqual(cancelledSession,loginSession,'a later add is a fresh environment')
+  await cancelledSession.cookies.set({url:'https://signup.live.com',name:'CancelledDraft',value:'fixture'})
+  await clickBrowserButton(cancelledPage,'outlook-signup')
+  await until(()=>privatePages().some(wc=>wc.getURL()==='https://signup.live.com/signup'),'cancellable Outlook companion')
+  const cancelledOutlook=privatePages().find(wc=>wc.getURL()==='https://signup.live.com/signup')
+  assert.equal(cancelledOutlook.session,cancelledSession)
+  await evaluate(`document.querySelector('.add-head .close').click()`)
+  await until(()=>cancelledPage.isDestroyed() && cancelledOutlook.isDestroyed(),'cancel closes all companion windows')
+  await until(async()=>(await cancelledSession.cookies.get({})).length===0,'cancel clears mailbox session')
+  assert.equal((await accounts()).length,4)
+  console.log('PASS cancelled login closes Outlook companion and clears its private session; later add remains isolated')
 }
 app.on('session-created', ses => {
   if (ses === session.defaultSession) return
@@ -225,7 +290,7 @@ app.on('session-created', ses => {
   // login document is inert and contains no external resources.
   ses.protocol.handle('https', async request => {
     const url=new URL(request.url)
-    if (url.pathname==='/login' || url.pathname==='/authorize') return new Response('<title>Local login fixture</title>',{headers:{'Content-Type':'text/html'}})
+    if (url.pathname==='/login' || url.pathname==='/authorize' || url.hostname==='signup.live.com') return new Response('<title>Local login fixture</title>',{headers:{'Content-Type':'text/html'}})
     const body=request.method==='GET'?undefined:Buffer.from(await request.arrayBuffer())
     return ses.fetch('http://fixture.invalid'+url.pathname+url.search,{method:request.method,headers:{'Content-Type':'application/json'},body})
   })

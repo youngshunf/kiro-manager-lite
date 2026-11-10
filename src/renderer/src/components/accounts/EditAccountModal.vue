@@ -15,6 +15,7 @@ const form = reactive({
   nickname: '',
   note: '',
   password: '',
+  portalProxyUrl: '',
   refreshToken: '',
   clientId: '',
   clientSecret: '',
@@ -28,6 +29,7 @@ watch(
     form.nickname = account.nickname ?? ''
     form.note = account.note ?? ''
     form.password = account.password ?? ''
+    form.portalProxyUrl = account.portalProxyUrl ?? ''
     form.refreshToken = account.credentials.refreshToken ?? ''
     form.clientId = account.credentials.clientId ?? ''
     form.clientSecret = account.credentials.clientSecret ?? ''
@@ -45,6 +47,7 @@ function submit(): void {
     nickname: form.nickname.trim() || undefined,
     note: form.note.trim() || undefined,
     password: form.password.trim() || undefined,
+    portalProxyUrl: form.portalProxyUrl.trim() || undefined,
     credentials: {
       ...account.credentials,
       refreshToken: form.refreshToken.trim(),
@@ -86,6 +89,17 @@ function submit(): void {
       </a-row>
       <a-form-item label="备注">
         <a-textarea v-model:value="form.note" :rows="2" allow-clear />
+      </a-form-item>
+      <a-form-item
+        label="账号默认浏览器代理"
+        extra="留空使用全局浏览器代理。打开前可选择全局代理或修改本次代理，不影响 API 请求。"
+      >
+        <a-input-password
+          v-model:value="form.portalProxyUrl"
+          placeholder="http://host:port 或 socks5://host:port"
+          autocomplete="off"
+          allow-clear
+        />
       </a-form-item>
       <a-form-item label="Refresh Token">
         <a-textarea v-model:value="form.refreshToken" :rows="3" />

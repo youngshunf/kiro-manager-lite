@@ -6,7 +6,8 @@ import { sleep } from './utils'
 import { errorMessage } from '../shared/errors'
 import type { UpdateAsset, UpdateCheckResult } from '../shared/types'
 
-const REPO = 'lucks-cloud/kiro-manager-lite'
+// Fork builds must not offer upstream installers that would remove local features.
+const REPO = 'youngshunf/kiro-manager-lite'
 const LATEST_API = `https://api.github.com/repos/${REPO}/releases/latest`
 const LATEST_PAGE = `https://github.com/${REPO}/releases/latest`
 /** 「前往更新」统一落到 Releases 列表页，方便用户自己挑平台安装包与历史版本 */

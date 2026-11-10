@@ -29,6 +29,7 @@ import { subscriptionLabel } from '@/utils/format'
 import { freshAccount } from '@/utils/freshAccount'
 import { toPlain } from '@/utils/ipc'
 import { copyText } from '@/utils/ui'
+import { openAccountUrl } from '@/utils/portalBrowser'
 import { errorMessage } from '@shared/errors'
 import type { Account, SubscriptionPlan } from '@shared/types'
 
@@ -138,8 +139,8 @@ function onPlanChange(): void {
 /** 用内置浏览器打开结算页，窗口标题带上账号，几个账号同时开也分得清 */
 async function openUrl(row: Row): Promise<void> {
   if (!row.url) return
-  const res = await window.api.openInAppBrowser(row.url, `订阅 ${planTitle.value} - ${row.account.email}`)
-  if (!res.success) message.error(res.error || '打开链接失败')
+  const res = await openAccountUrl(row.account, row.url, `订阅 ${planTitle.value} - ${row.account.email}`)
+  if (res && !res.success) message.error(res.error || '打开链接失败')
 }
 
 /**

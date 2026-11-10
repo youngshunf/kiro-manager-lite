@@ -28,7 +28,7 @@ import {
 } from '@/utils/format'
 import { displayEmail, displayName, displayNote } from '@/utils/display'
 import { usePrivacy } from '@/composables/usePrivacy'
-import { toPlain } from '@/utils/ipc'
+import { openAccountPortal } from '@/utils/portalBrowser'
 import { copyText, notifyResult } from '@/utils/ui'
 import { regionLabel } from '@shared/regions'
 import type { Account } from '@shared/types'
@@ -135,9 +135,8 @@ async function openPortal(): Promise<void> {
   if (!target) return
   portalOpening.value = true
   try {
-    // 响应式代理无法结构化克隆，过 IPC 前先剥成普通对象
-    const res = await window.api.openAccountPortal(toPlain(target))
-    if (!res.success) return void message.error(res.error || '打开官网失败')
+    const res = await openAccountPortal(target)
+    if (res && !res.success) return void message.error(res.error || '打开官网失败')
   } finally {
     portalOpening.value = false
   }

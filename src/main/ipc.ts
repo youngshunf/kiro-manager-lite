@@ -194,6 +194,7 @@ import type {
   KiroModelInfo,
   LogQuery,
   MachineIdField,
+  PortalOpenOptions,
   ProxyClientTarget,
   ProxyConfig,
   ShellAutoApproveTarget,
@@ -365,8 +366,8 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     return ok(result)
   })
 
-  handle('accounts:open-portal', async (_e, account: Account) =>
-    ok(await openAccountPortal(account))
+  handle('accounts:open-portal', async (_e, account: Account, options?: PortalOpenOptions) =>
+    ok(await openAccountPortal(account, options))
   )
 
   // ============ 订阅 ============
@@ -385,8 +386,8 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   )
 
   /** 用内置浏览器打开链接（Stripe 账单 / 结算页） */
-  handle('app:open-in-app-browser', (_e, url: string, title?: string) =>
-    ok(openInAppUrl(url, title || 'Kiro'))
+  handle('app:open-in-app-browser', async (_e, url: string, title?: string, options?: PortalOpenOptions) =>
+    ok(await openInAppUrl(url, title || 'Kiro', options))
   )
 
   handle('accounts:list-api-keys', async (_e, account: Account) => {

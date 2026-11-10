@@ -43,6 +43,10 @@ import { warmKiroMachineId } from './kiroEndpoints'
  * ready 之后再调用不生效——所以这里同步读一次设置，也因此改地区需要重启应用。
  */
 app.commandLine.appendSwitch('lang', normalizePortalLocale(getSettings().portalLocale))
+// QUIC / WebRTC UDP must not provide an alternate direct route around HTTP/SOCKS proxies.
+app.commandLine.appendSwitch('disable-quic')
+app.commandLine.appendSwitch('dns-prefetch-disable')
+app.commandLine.appendSwitch('force-webrtc-ip-handling-policy', 'disable_non_proxied_udp')
 
 let mainWindow: BrowserWindow | null = null
 /** 是否正在真正退出应用（区别于「关闭按钮最小化到托盘」） */

@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { createHash } from 'crypto'
+import type { PortalOpenOptions } from '../shared/types'
 
 /**
  * 统一包装 ipcRenderer.invoke：主进程抛出的异常会让 invoke 变成 rejected promise，
@@ -48,7 +49,8 @@ const api = {
   deleteAccountApiKey: (account: unknown, keyId: string) =>
     invoke('accounts:delete-api-key', account, keyId),
   /** 用该账号凭证在私密窗口打开 Kiro 官网后台 */
-  openAccountPortal: (account: unknown) => invoke('accounts:open-portal', account),
+  openAccountPortal: (account: unknown, options?: PortalOpenOptions) =>
+    invoke('accounts:open-portal', account, options),
 
   /** 查订阅入口：已订阅返回账单管理链接，未订阅返回可开通档位 */
   getSubscriptionEntry: (account: unknown) => invoke('accounts:subscription-entry', account),
@@ -58,8 +60,8 @@ const api = {
   /** 只查可开通档位（不判断是否已订阅） */
   listSubscriptionPlans: (account: unknown) => invoke('accounts:subscription-plans', account),
   /** 用内置浏览器打开链接 */
-  openInAppBrowser: (url: string, title?: string) =>
-    invoke('app:open-in-app-browser', url, title),
+  openInAppBrowser: (url: string, title?: string, options?: PortalOpenOptions) =>
+    invoke('app:open-in-app-browser', url, title, options),
 
   // Kiro API Key 管理 / 本地网关
   loadKeys: () => invoke('keys:load'),

@@ -21,6 +21,7 @@ import {
 import { freshAccount as ensureFreshAccount } from '@/utils/freshAccount'
 import { copyText } from '@/utils/ui'
 import { toPlain } from '@/utils/ipc'
+import { openAccountUrl } from '@/utils/portalBrowser'
 import { errorMessage } from '@shared/errors'
 import type { Account, SubscriptionPlan } from '@shared/types'
 
@@ -33,6 +34,9 @@ const refreshingToken = ref(false)
 const error = ref('')
 const plans = ref<SubscriptionPlan[]>([])
 const disclaimer = ref<string[]>([])
+/** 保留账单入口，取消代理确认后仍可重新打开，不把取消当作查询失败。 */
+const manageUrl = ref('')
+const manageOpening = ref(false)
 
 /** 正在请求链接的 `档位:动作`，同一时刻只让被点的那个按钮转圈 */
 const busy = ref('')
@@ -60,17 +64,9 @@ async function load(): Promise<void> {
     }
 
     const entry = res.data
-    if (entry.manageUrl) {
-      const opened = await window.api.openInAppBrowser(
-        entry.manageUrl,
-        `订阅管理 - ${props.account.email}`
-      )
-      if (!opened.success) {
-        error.value = opened.error || '打开账单页失败'
-        return
-      }
-      message.success('已在内置浏览器打开 Stripe 账单管理')
-      emit('close')
+    manageUrl.value = entry.manageUrl || ''
+    if (manageUrl.value) {
+      await openManagement()
       return
     }
 
@@ -86,6 +82,24 @@ async function load(): Promise<void> {
 }
 
 onMounted(load)
+
+async function openManagement(): Promise<void> {
+  if (!manageUrl.value || manageOpening.value) return
+  manageOpening.value = true
+  try {
+    const res = await openAccountUrl(
+      props.account,
+      manageUrl.value,
+      `订阅管理 - ${props.account.email}`
+    )
+    if (!res) return
+    if (!res.success) return void message.error(res.error || '打开账单页失败')
+    message.success('已在内置浏览器打开 Stripe 账单管理')
+    emit('close')
+  } finally {
+    manageOpening.value = false
+  }
+}
 
 function priceText(plan: SubscriptionPlan): string {
   if (plan.amount <= 0) return '免费'
@@ -117,7 +131,8 @@ async function checkoutUrl(plan: SubscriptionPlan, action: string): Promise<stri
 async function openCheckout(plan: SubscriptionPlan): Promise<void> {
   const url = await checkoutUrl(plan, 'open')
   if (!url) return
-  const res = await window.api.openInAppBrowser(url, `开通 ${plan.title} - ${props.account.email}`)
+  const res = await openAccountUrl(props.account, url, `开通 ${plan.title} - ${props.account.email}`)
+  if (!res) return
   if (!res.success) return void message.error(res.error || '打开支付页失败')
   message.success('已在内置浏览器打开支付页')
 }
@@ -160,6 +175,17 @@ async function copyCheckout(plan: SubscriptionPlan): Promise<void> {
             </a-space>
           </template>
         </a-result>
+      </div>
+
+      <div v-else-if="manageUrl" class="stage">
+        <p class="tip muted">已获取该账号的账单管理入口，打开前请选择本次使用的浏览器代理。</p>
+        <a-space>
+          <a-button @click="emit('close')">关闭</a-button>
+          <a-button type="primary" :loading="manageOpening" @click="openManagement">
+            <template #icon><CreditCardOutlined /></template>
+            打开账单管理
+          </a-button>
+        </a-space>
       </div>
 
       <template v-else>

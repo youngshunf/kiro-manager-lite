@@ -74,7 +74,7 @@ const features = [
 ]
 
 /** 本项目仓库地址，头部按钮与检查更新指向同一个仓库 */
-const REPO_URL = 'https://github.com/lucks-cloud/kiro-manager-lite'
+const REPO_URL = 'https://github.com/youngshunf/kiro-manager-lite'
 
 const author = {
   name: 'lucks-cloud',

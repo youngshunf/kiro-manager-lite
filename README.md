@@ -23,6 +23,15 @@
 
 ---
 
+## 定制分支
+
+本 fork 基于 [lucks-cloud/kiro-manager-lite](https://github.com/lucks-cloud/kiro-manager-lite)，保留原作者署名及 AGPL-3.0 许可证。
+
+- 仓库：[youngshunf/kiro-manager-lite](https://github.com/youngshunf/kiro-manager-lite)，工作分支：`feat/private-browser-proxy`。
+- 定制版本：`1.0.49-proxy.1`，新增每次独立私密浏览器会话、账号自动登录、全局 / 账号默认 / 本次代理与失败不直连。
+- 应用内更新只检查本 fork 的 Releases，避免安装上游包后丢失定制功能；尚未发布 fork Release 时不提供可安装更新。
+- 验证：`npm run test:portal`、`npm run build`。本机 macOS arm64 的 ad-hoc 签名打包：在项目根目录运行 `CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --mac --arm64 --dir --publish never -c.mac.identity=-`（先运行 build；不使用本机开发者证书，也不发布 Release）。
+
 ## ✨ 功能特性
 
 ### 🏠 主页
@@ -69,7 +78,10 @@
 **前往官网**
 
 - 用该账号凭证在应用内的私密窗口直接进 Kiro 官网后台，省去先切号再手动登录
-- 会话分区不持久化、退出即清，也不碰你自己浏览器里的登录身份；每次打开前先清空 cookie，避免显示上一个账号
+- 每次点击都新开独立的内存会话与窗口，不复用窗口、Cookie、缓存或站点存储；可同时打开多个账号，彼此不串登录身份，也不碰系统浏览器。该会话最后一个窗口关闭后清理数据
+- 在「设置 → 内置浏览器」配置**全局浏览器代理**（独立于 API 代理）；在「编辑账号」可保存账号默认代理。每次打开前还可选择全局代理或指定仅本次生效的代理，后续设置修改不影响已开的窗口
+- 浏览器必须配置代理：单个 HTTP / HTTPS 或无认证 SOCKS5，HTTP(S) 支持 URL 用户名密码。未配置、配置无效或连接失败时不回退直连；子资源、WebSocket 与子窗口沿用该会话代理，包含 localhost 请求
+- 阻止外部协议与系统浏览器外跳，禁用 QUIC / 非代理 WebRTC UDP 并关闭 DNS 预取。此为 Chromium 会话层约束，不是操作系统级网络隔离；代理域名本身的解析及其他应用进程不属于该窗口代理保证。需要进程级零泄漏时应再使用防火墙或受控网络环境
 - 页面内的跳转全程留在应用内（含站外链接与二级弹窗），不会跳到系统浏览器丢掉会话
 - 自带工具条：后退 / 前进 / 刷新、可跳任意网址的地址栏、加载进度条，以及「更多」菜单（IP 查询、打开百度、复制链接、开发者工具等）；弹出的窗口同样带完整工具条
 - 首屏卡住会自动重试并把进度显示在标题位，次数用尽才给错误页，不再干等 30 秒白屏

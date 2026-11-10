@@ -149,6 +149,11 @@ export interface SubscriptionEntry {
   disclaimer: string[]
 }
 
+/** 单次私密浏览器打开选项；未指定时用账号默认值 / 全局浏览器代理。 */
+export interface PortalOpenOptions {
+  proxyUrl?: string
+}
+
 /** 账号实体 */
 export interface Account {
   id: string
@@ -156,6 +161,8 @@ export interface Account {
   password?: string
   nickname?: string
   note?: string
+  /** 此账号新开浏览器窗口的默认代理；留空使用全局浏览器代理。 */
+  portalProxyUrl?: string
   idp: IdpType
   /**
    * 旧版的单分组字段。新版写入时镜像为 groupIds 的第一个，供退回旧版本时保住至少一个分组。
@@ -1500,6 +1507,8 @@ export interface AppSettings {
    * 后者影响页面里 navigator.language 读到的值——门户按前端语言判断时只有它管用。
    */
   portalLocale: PortalLocale
+  /** 仅供新开的私密浏览器窗口使用；留空时禁止打开，不回退系统代理或直连。 */
+  portalProxyUrl: string
   /** 请求头里上报的 Kiro IDE 版本（KiroIDE-<版本>-<机器码>） */
   kiroIdeVersion: string
   /** 请求头里上报的 AWS SDK 版本（aws-sdk-js/<版本>） */
@@ -1554,6 +1563,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   gatewayRetryMaxAttempts: 10,
   gatewayRetryDelayMs: 100,
   portalLocale: DEFAULT_PORTAL_LOCALE,
+  portalProxyUrl: '',
   kiroIdeVersion: DEFAULT_KIRO_IDE_VERSION,
   awsSdkVersion: DEFAULT_AWS_SDK_VERSION,
   accountPrivacyFields: [...DEFAULT_ACCOUNT_PRIVACY_FIELDS],

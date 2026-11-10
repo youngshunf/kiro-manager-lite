@@ -42,6 +42,7 @@ import type {
   MachineIdActionResult,
   MachineIdField,
   MachineIdStatus,
+  PortalOpenOptions,
   ProxyAccountUsage,
   ProxyApiKeyView,
   ProxyClientState,
@@ -164,7 +165,7 @@ export interface Api {
     keyId: string
   ) => Promise<IpcResult<DeleteApiKeyResult>>
   /** 用该账号凭证在私密窗口打开 Kiro 官网后台 */
-  openAccountPortal: (account: Account) => Promise<IpcResult<{ url: string }>>
+  openAccountPortal: (account: Account, options?: PortalOpenOptions) => Promise<IpcResult<{ url: string }>>
   /** 查订阅入口：已订阅返回 Stripe 账单管理链接，未订阅返回可开通档位 */
   getSubscriptionEntry: (account: Account) => Promise<IpcResult<SubscriptionEntry>>
   /** 为指定档位生成 Stripe 结算链接；rejectSubscribed 为真时已订阅的账号直接报错 */
@@ -176,7 +177,7 @@ export interface Api {
   /** 只查可开通档位（不判断是否已订阅） */
   listSubscriptionPlans: (account: Account) => Promise<IpcResult<SubscriptionPlan[]>>
   /** 用内置浏览器打开链接 */
-  openInAppBrowser: (url: string, title?: string) => Promise<IpcResult<{ url: string }>>
+  openInAppBrowser: (url: string, title?: string, options?: PortalOpenOptions) => Promise<IpcResult<{ url: string }>>
 
   readLocalKiroCredentials: () => Promise<IpcResult<LocalKiroCredentials>>
   getActiveKiroToken: () => Promise<IpcResult<KiroActiveToken>>

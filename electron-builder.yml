@@ -10,7 +10,7 @@ npmRebuild: false
 # CI 里统一用 --publish never，实际上传由 GitHub Actions 负责
 publish:
   provider: github
-  owner: lucks-cloud
+  owner: youngshunf
   repo: kiro-manager-lite
 # 自定义 URL Scheme：kiro-manager-lite:// 与短别名 kml:// 快捷唤起应用
 protocols:
@@ -38,6 +38,7 @@ files:
   - '!.github'
   # 构建期脚本（清理产物、生成图标与 DMG 背景），运行时用不到
   - '!scripts'
+  - '!tests'
   - '!*.md'
 asarUnpack:
   - resources/**

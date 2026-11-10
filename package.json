@@ -1,6 +1,6 @@
 {
   "name": "kiro-account-lite",
-  "version": "1.0.49",
+  "version": "1.0.49-proxy.1",
   "description": "Kiro Manager Lite - Kiro 多账号管理器轻量版",
   "main": "./out/main/index.js",
   "author": "kiro-account-lite",
@@ -14,6 +14,7 @@
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "vue-tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "test:portal": "node scripts/test-portal.mjs",
     "clean": "node scripts/clean.mjs",
     "prepack:dist": "npm run clean && electron-vite build",
     "build:mac": "npm run prepack:dist && node scripts/build-mac.mjs",
@@ -40,6 +41,7 @@
     "electron-builder": "26.15.3",
     "electron-store": "12.0.0",
     "electron-vite": "5.0.0",
+    "esbuild": "0.25.12",
     "marked": "18.1.1",
     "pinia": "4.0.3",
     "terser": "5.51.2",

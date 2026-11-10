@@ -19,22 +19,21 @@ import {
   clipboard,
   screen,
   session as electronSession,
-  shell,
   ipcMain
 } from 'electron'
 import { join } from 'path'
+import { randomUUID } from 'crypto'
 import { acceptLanguageFor } from '../shared/portalLocale'
-import { listAvailableProfiles } from './kiroApi'
+import { codeWhispererEndpoint } from './kiroEndpoints'
+import { getSettings } from './store'
+import { configurePortalProxy, forgetPortalProxy } from './portalNetwork'
 import { recordOutbound } from './outboundLog'
-import type { Account } from '../shared/types'
+import type { Account, PortalOpenOptions } from '../shared/types'
 
 const PORTAL_ORIGIN = 'https://app.kiro.dev'
 
-/**
- * 私密会话：分区名不带 persist: 前缀，Electron 就只在内存里保存，
- * 应用退出即消失，也不会与主窗口或其它账号共用登录态。
- */
-const PARTITION = 'kiro-portal-private'
+/** 每次打开都新建不带 persist: 的内存分区；只让该窗口的子窗口共享。 */
+const portalSessions = new Set<Electron.Session>()
 
 /** 工具条高度：第一行按钮 + 标题，第二行地址栏 */
 const BAR_HEIGHT = 44 + 38
@@ -129,7 +128,7 @@ export function setInAppLocale(locale?: string): void {
     electronSession.defaultSession.getUserAgent(),
     acceptLanguage
   )
-  electronSession.fromPartition(PARTITION).setUserAgent(CHROME_UA, acceptLanguage)
+  for (const ses of portalSessions) ses.setUserAgent(CHROME_UA, acceptLanguage)
 }
 
 /**
@@ -145,17 +144,26 @@ export function setInAppLocale(locale?: string): void {
  * sec-ch-ua 由 Chromium 按真实内核自动生成，本身与我们声明的主版本一致，
  * 手工改写属于锦上添花，远不值得给所有请求加一跳。
  */
-function preparePortalSession(): Electron.Session {
+async function preparePortalSession(proxyUrl: string): Promise<Electron.Session> {
   applyGlobalUserAgent()
-  const ses = electronSession.fromPartition(PARTITION)
+  const ses = electronSession.fromPartition(`kiro-portal-private-${randomUUID()}`, { cache: false })
+  await configurePortalProxy(ses, proxyUrl)
   ses.setUserAgent(CHROME_UA, acceptLanguage)
+  portalSessions.add(ses)
   return ses
 }
 
+/** 关闭最后一个窗口后清掉 Cookie、缓存与后台 worker；不影响别的账号。 */
+async function releasePortalSession(ses: Electron.Session): Promise<void> {
+  if (!portalSessions.delete(ses)) return
+  forgetPortalProxy(ses)
+  await Promise.allSettled([ses.closeAllConnections(), ses.clearData(), ses.clearCache()])
+}
+
 /** 浏览外部站点的视图一律不给 Node 能力，也不注入 preload */
-function contentWebPreferences(): Electron.WebPreferences {
+function contentWebPreferences(ses: Electron.Session): Electron.WebPreferences {
   return {
-    partition: PARTITION,
+    session: ses,
     contextIsolation: true,
     nodeIntegration: false,
     sandbox: true,
@@ -217,11 +225,6 @@ const bars = new Map<
     note?: string
   }
 >()
-
-/** 复用同一个官网主窗口：换账号只重写 cookie 再重新加载，不另开窗口 */
-let portalWindow: BaseWindow | null = null
-/** 主窗口的带看门狗加载入口，换账号时用它重新进入首页 */
-let portalLoad: ((url: string) => void) | null = null
 
 /** 本会话开出来的全部窗口（主窗口 + 弹窗），退出时统一收掉 */
 const openedWindows = new Set<BaseWindow>()
@@ -465,6 +468,13 @@ function pipeStateToBar(bar: WebContentsView, content: WebContentsView): void {
  * 正是靠 opener.postMessage 把结果回传给发起页的。
  */
 function keepNavigationInApp(contents: Electron.WebContents): void {
+  contents.setWebRTCIPHandlingPolicy('disable_non_proxied_udp')
+  contents.on('will-navigate', (event, url) => {
+    if (!/^https?:\/\//i.test(url)) event.preventDefault()
+  })
+  contents.on('will-redirect', (event, url) => {
+    if (!/^https?:\/\//i.test(url)) event.preventDefault()
+  })
   // 内置浏览器（Stripe 账单、Kiro 官网后台等）的顶层导航也登记进出站域名统计。
   // 只记主框架完整导航，不挂 webRequest，避免给每个子资源加一跳。
   contents.on('did-navigate', (_e, url) => {
@@ -472,8 +482,7 @@ function keepNavigationInApp(contents: Electron.WebContents): void {
   })
   contents.setWindowOpenHandler(({ url }) => {
     if (!/^https?:\/\//i.test(url)) {
-      // 非 http(s)（mailto、itms-apps 等）Electron 渲染不了，交给系统处理
-      void shell.openExternal(url)
+      // 不交给系统程序：外部进程不会继承本窗口的代理约束。
       return { action: 'deny' }
     }
 
@@ -487,7 +496,7 @@ function keepNavigationInApp(contents: Electron.WebContents): void {
         overrideBrowserWindowOptions: {
           ...portalWindowSize(),
           autoHideMenuBar: true,
-          webPreferences: contentWebPreferences()
+          webPreferences: contentWebPreferences(contents.session)
         }
       }
     }
@@ -497,7 +506,7 @@ function keepNavigationInApp(contents: Electron.WebContents): void {
      * （实测 contentView 是个空 View），没法把页面下移给工具条腾位置，
      * 只有 BaseWindow + 两个 WebContentsView 的结构才能带上工具条与地址栏。
      */
-    const popup = createBrowserShell('Kiro 官网')
+    const popup = createBrowserShell('Kiro 官网', contents.session)
     popup.load(url)
     return { action: 'deny' }
   })
@@ -510,16 +519,27 @@ function keepNavigationInApp(contents: Electron.WebContents): void {
 
 /** 原生弹窗（保留 opener 的那类）：同样留在应用内，并补上看门狗与导航快捷键 */
 function applyPopupBehavior(win: BrowserWindow): void {
-  trackWindow(win)
+  trackWindow(win, win.webContents.session)
   keepNavigationInApp(win.webContents)
   armFirstNavigation(win.webContents, installNavGuard(win.webContents))
   bindNavKeys(win, win.webContents)
 }
 
 /** 纳入窗口集合，退出时统一收掉 */
-function trackWindow(win: BaseWindow): void {
+const sessionWindows = new Map<Electron.Session, Set<BaseWindow>>()
+function trackWindow(win: BaseWindow, ses: Electron.Session): void {
   openedWindows.add(win)
-  win.on('closed', () => openedWindows.delete(win))
+  let windows = sessionWindows.get(ses)
+  if (!windows) sessionWindows.set(ses, windows = new Set())
+  windows.add(win)
+  win.on('closed', () => {
+    openedWindows.delete(win)
+    windows.delete(win)
+    if (windows.size === 0) {
+      sessionWindows.delete(ses)
+      void releasePortalSession(ses)
+    }
+  })
 }
 
 /** 没有菜单栏就没有前进后退入口，补上 ⌘/Ctrl + [ ] 与 R / W */
@@ -627,7 +647,7 @@ function popupBarMenu(win: BaseWindow, wc: Electron.WebContents): void {
    * 新窗口共用同一个会话分区，出网路径与当前页面完全一致，IP 查询结果才有参考意义。
    */
   const openInNewWindow = (target: string): void => {
-    createBrowserShell('Kiro 官网').load(target)
+    createBrowserShell('Kiro 官网', wc.session).load(target)
   }
 
   Menu.buildFromTemplate([
@@ -657,13 +677,7 @@ function popupBarMenu(win: BaseWindow, wc: Electron.WebContents): void {
       // writeText 自 Electron 44 起返回 Promise，失败不该冒成未处理的拒绝
       click: () => void clipboard.writeText(url).catch(() => undefined)
     },
-    {
-      // 这里是用户显式选择才外跳，和「点链接自动跳到系统浏览器」是两回事。
-      // 注意：系统浏览器里没有这份会话，打开后会是未登录状态。
-      label: '在默认浏览器中打开（不带登录态）',
-      enabled: /^https?:\/\//i.test(url),
-      click: () => void shell.openExternal(url)
-    },
+    { label: '独立无痕会话 · 强制代理（禁止外部打开）', enabled: false },
     { type: 'separator' },
     {
       label: wc.isDevToolsOpened() ? '关闭开发者工具' : '打开开发者工具',
@@ -911,7 +925,7 @@ function portalCookies(account: Account, profileArn: string): { name: string; va
  * ListAvailableProfiles 补齐——否则这类账号打开官网只会停在登录页（stale）。
  * 失败或非 Enterprise 一律返回空串，即不注入 ProfileArn cookie。
  */
-async function resolvePortalArn(account: Account): Promise<string> {
+async function resolvePortalArn(account: Account, ses: Electron.Session): Promise<string> {
   const stored = account.profileArn || account.credentials.profileArn
   if (stored) return stored
   if (account.idp !== 'Enterprise') return ''
@@ -919,9 +933,16 @@ async function resolvePortalArn(account: Account): Promise<string> {
   const { accessToken, region } = account.credentials
   if (!accessToken) return ''
   try {
-    const [arn] = await listAvailableProfiles(accessToken, region)
-    if (arn) console.info('[KiroPortal] Enterprise 账号缺 profileArn，已现查补齐')
-    return arn || ''
+    // 自动登录前的补齐请求也使用窗口会话，不能绕回主进程 API 代理 / 直连。
+    const response = await ses.fetch(`${codeWhispererEndpoint(region)}/ListAvailableProfiles`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+      body: '{}',
+      signal: AbortSignal.timeout(15000)
+    })
+    if (!response.ok) return ''
+    const data = await response.json() as { profiles?: { arn?: string }[] }
+    return data.profiles?.find(profile => profile.arn)?.arn || ''
   } catch {
     return ''
   }
@@ -931,7 +952,7 @@ async function resolvePortalArn(account: Account): Promise<string> {
  * 建一个带工具条的浏览器窗口（主窗口与弹窗共用同一套外壳）。
  * 返回 load()：带看门狗重试的导航入口，调用方拿它去加载首个地址。
  */
-function createBrowserShell(title: string): { win: BaseWindow; load: (url: string) => void } {
+function createBrowserShell(title: string, ses: Electron.Session): { win: BaseWindow; load: (url: string) => void } {
   const { width, height } = portalWindowSize()
   const win = new BaseWindow({
     width,
@@ -961,7 +982,7 @@ function createBrowserShell(title: string): { win: BaseWindow; load: (url: strin
       sandbox: false
     }
   })
-  const content = new WebContentsView({ webPreferences: contentWebPreferences() })
+  const content = new WebContentsView({ webPreferences: contentWebPreferences(ses) })
   // 视图默认背景透明，加载间隙会透出窗口底色甚至闪黑，显式铺白
   bar.setBackgroundColor('#f6f7f9')
   content.setBackgroundColor('#ffffff')
@@ -987,11 +1008,6 @@ function createBrowserShell(title: string): { win: BaseWindow; load: (url: strin
     bars.delete(bar.webContents.id)
     for (const view of [bar, content]) {
       if (!view.webContents.isDestroyed()) view.webContents.close()
-    }
-    // 只有主窗口才需要清掉这两个引用，弹窗本来就不占用它们
-    if (portalWindow === win) {
-      portalWindow = null
-      portalLoad = null
     }
   })
 
@@ -1025,57 +1041,44 @@ function createBrowserShell(title: string): { win: BaseWindow; load: (url: strin
     .loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(barHtml(padLeft))}`)
     .catch(() => undefined)
 
-  trackWindow(win)
+  trackWindow(win, ses)
   return { win, load }
 }
 
-/**
- * 打开官网后台并以该账号身份登录。
- * 已有窗口时复用：换账号只需重写 cookie，不必再开一个窗口。
- */
-export async function openAccountPortal(account: Account): Promise<{ url: string }> {
+/** 每次新开独立私密窗口：代理先就绪，再注入账号 Cookie，最后发起导航。 */
+export async function openAccountPortal(
+  account: Account,
+  options?: PortalOpenOptions
+): Promise<{ url: string }> {
   const { accessToken, refreshToken } = account.credentials
   if (!accessToken && !refreshToken) throw new Error('账号缺少凭证，无法登录官网')
 
-  const profileArn = await resolvePortalArn(account)
+  const proxyUrl = options?.proxyUrl ?? (account.portalProxyUrl?.trim() || getSettings().portalProxyUrl)
+  const ses = await preparePortalSession(proxyUrl)
+  try {
+    const profileArn = await resolvePortalArn(account, ses)
+    for (const { name, value } of portalCookies(account, profileArn)) {
+      await ses.cookies.set({
+        url: PORTAL_ORIGIN,
+        name,
+        value,
+        domain: 'app.kiro.dev',
+        path: '/',
+        secure: true,
+        httpOnly: true,
+        sameSite: 'lax'
+      })
+    }
 
-  const ses = preparePortalSession()
-  /*
-   * 每次都先清空：残留的旧账号 cookie 会让门户继续按上一个身份渲染，
-   * 表现就是「点了 A 账号却进了 B 账号的后台」。
-   */
-  await ses.clearStorageData({ storages: ['cookies'] })
-
-  for (const { name, value } of portalCookies(account, profileArn)) {
-    await ses.cookies.set({
-      url: PORTAL_ORIGIN,
-      name,
-      value,
-      domain: 'app.kiro.dev',
-      path: '/',
-      secure: true,
-      httpOnly: true,
-      sameSite: 'lax'
-    })
+    const { win, load } = createBrowserShell(`Kiro 官网 - ${account.email}`, ses)
+    load(PORTAL_ORIGIN)
+    win.focus()
+    console.info(`[KiroPortal] 已打开独立私密官网窗口`)
+    return { url: PORTAL_ORIGIN }
+  } catch (error) {
+    await releasePortalSession(ses)
+    throw error
   }
-
-  if (!portalWindow || portalWindow.isDestroyed()) {
-    const shellWindow = createBrowserShell(`Kiro 官网 - ${account.email}`)
-    portalWindow = shellWindow.win
-    portalLoad = shellWindow.load
-  }
-
-  const win = portalWindow
-  if (!win) throw new Error('无法创建官网窗口')
-  win.setTitle(`Kiro 官网 - ${account.email}`)
-
-  // 走带看门狗重试的通道，而不是裸 loadURL：首屏挂住时能自动重来
-  portalLoad?.(PORTAL_ORIGIN)
-
-  if (win.isMinimized()) win.restore()
-  win.focus()
-  console.info(`[KiroPortal] 已以 ${account.email} 的身份打开官网后台`)
-  return { url: PORTAL_ORIGIN }
 }
 
 /**
@@ -1083,16 +1086,20 @@ export async function openAccountPortal(account: Account): Promise<{ url: string
  *
  * 每次都新开一个窗口而不复用官网主窗口：支付流程被别的操作顶掉就得从头来，
  * 而且用户往往需要一边看账号列表一边付款。
- * 共用同一个私密分区，于是站点身份与「用该账号打开的官网」保持一致，
- * 这些链接本身已把凭据编码在 URL 里，不再需要额外注入 cookie。
+ * 新建自己的私密分区与代理；链接本身包含授权，不再借用其它账号窗口的 Cookie。
  */
-export function openInAppUrl(url: string, title = 'Kiro'): { url: string } {
+export async function openInAppUrl(url: string, title = 'Kiro', options?: PortalOpenOptions): Promise<{ url: string }> {
   if (!/^https?:\/\//i.test(url)) throw new Error('只支持 http(s) 链接')
-  preparePortalSession()
-  const shellWindow = createBrowserShell(title)
-  shellWindow.load(url)
-  shellWindow.win.focus()
-  return { url }
+  const ses = await preparePortalSession(options?.proxyUrl ?? getSettings().portalProxyUrl)
+  try {
+    const shellWindow = createBrowserShell(title, ses)
+    shellWindow.load(url)
+    shellWindow.win.focus()
+    return { url }
+  } catch (error) {
+    await releasePortalSession(ses)
+    throw error
+  }
 }
 
 /** 应用退出时收掉全部窗口（主窗口 + 弹窗），避免残留窗口挡住退出流程 */
@@ -1101,8 +1108,6 @@ export function closePortalWindow(): void {
     if (!win.isDestroyed()) win.close()
   }
   openedWindows.clear()
-  portalWindow = null
-  portalLoad = null
 }
 
 bindBarActions()

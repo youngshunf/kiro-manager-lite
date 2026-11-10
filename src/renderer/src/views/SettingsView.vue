@@ -50,6 +50,7 @@ const keysStore = useKeysStore()
 
 const settings = computed(() => settingsStore.settings)
 const proxyDraft = ref(settingsStore.settings.proxyUrl)
+const portalProxyDraft = ref(settingsStore.settings.portalProxyUrl ?? '')
 
 /** 各设置卡片共用的表单栅格：左侧固定标签宽度，右侧自适应 */
 const FORM_LAYOUT = {
@@ -79,6 +80,13 @@ watch(
   () => settingsStore.settings.proxyUrl,
   (value) => {
     if (value !== proxyDraft.value) proxyDraft.value = value
+  }
+)
+
+watch(
+  () => settingsStore.settings.portalProxyUrl,
+  (value) => {
+    if (value !== portalProxyDraft.value) portalProxyDraft.value = value ?? ''
   }
 )
 
@@ -203,6 +211,12 @@ function updateNumber(key: NumericSettingKey, value: unknown): void {
 async function saveProxy(): Promise<void> {
   await settingsStore.update({ proxyUrl: proxyDraft.value.trim() })
   message.success('代理地址已保存')
+}
+
+async function savePortalProxy(): Promise<void> {
+  portalProxyDraft.value = portalProxyDraft.value.trim()
+  await settingsStore.update({ portalProxyUrl: portalProxyDraft.value })
+  message.success('浏览器代理已保存，仅影响之后新开的窗口')
 }
 
 function openPath(target: 'store' | 'backup'): void {
@@ -585,10 +599,10 @@ function resetAll(): void {
             <a-radio value="cbor">CBOR（app.kiro.dev 门户）</a-radio>
           </a-radio-group>
         </a-form-item>
-        <a-form-item label="启用代理">
+        <a-form-item label="启用 API 代理">
           <SettingSwitch field="proxyEnabled" />
         </a-form-item>
-        <a-form-item label="代理地址">
+        <a-form-item label="API 代理地址">
           <a-input-group compact>
             <a-input
               v-model:value="proxyDraft"
@@ -606,6 +620,21 @@ function resetAll(): void {
 
     <a-card size="small" title="内置浏览器" style="margin-bottom: 16px">
       <a-form v-bind="FORM_LAYOUT">
+        <a-form-item label="全局浏览器代理">
+          <a-space-compact style="width: 100%; max-width: 440px">
+            <a-input-password
+              v-model:value="portalProxyDraft"
+              placeholder="http://host:port 或 socks5://host:port"
+              autocomplete="off"
+              allow-clear
+              @press-enter="savePortalProxy"
+            />
+            <a-button type="primary" @click="savePortalProxy">保存</a-button>
+          </a-space-compact>
+          <div class="choice-hint">
+            仅用于内置浏览器，与上方 API 代理独立。留空时必须在打开前填写本次自定义代理，不会回退直连。
+          </div>
+        </a-form-item>
         <a-form-item label="浏览器地区" class="field-inline">
           <a-select
             :value="localeSelectValue"
@@ -632,7 +661,10 @@ function resetAll(): void {
         </a-form-item>
       </a-form>
       <ul class="tips">
-        <li>作用于应用内打开的所有网页（含「前往官网」及其弹出的窗口），决定 Accept-Language 与页面区域，影响显示的语言与价格币种。</li>
+        <li>每次打开都新建独立的 Chromium 私密会话；官网入口自动登录当前账号，不复用其他窗口的登录状态。</li>
+        <li>打开前可使用全局浏览器代理，或填写仅本次生效的代理；账号默认代理会预填到本次自定义输入中。代理不可用时不会回退直连，全局修改只影响之后新开的窗口。</li>
+        <li>HTTP 代理支持用户名/密码（user:pass），SOCKS 代理不支持用户名/密码。代理地址可能包含密码，请勿向他人分享。</li>
+        <li>浏览器地区作用于应用内打开的所有网页（含「前往官网」及其弹出的窗口），决定 Accept-Language 与页面区域，影响显示的语言与价格币种。</li>
         <li>下拉支持搜索，可按地区名或语言标签筛选；选「自定义」后可填任意 BCP 47 标签。</li>
         <li>Accept-Language 保存后立即生效；页面内 navigator.language 由 Chromium 启动参数决定，需重启应用。</li>
         <li>不改变本应用自身的界面语言，也不影响账号所属的 AWS 区域。</li>
